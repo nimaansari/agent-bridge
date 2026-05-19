@@ -2,13 +2,14 @@
 
 ## Phase 0 — Fork and guardrails
 
-- [x] Fork OpenAgents into `nimaansari/agent-bridge`.
+- [x] Fork OpenAgents into this repository.
 - [x] Keep Apache-2.0 base license intact.
 - [x] Document no-copy policy for BSL/AGPL inspirations.
 - [x] Add initial Agent Bridge product/protocol docs.
 
 ## Phase 1 — Persistent room MVP
 
+- [ ] Ubuntu server deployment scripts/services.
 - [ ] Add first-class `rooms` model.
 - [ ] Add append-only room timeline.
 - [ ] Add room participant presence.

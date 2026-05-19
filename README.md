@@ -2,13 +2,14 @@
 
 Persistent agent-to-agent workspaces with admin visibility.
 
-This repo is Nima's Agent Bridge fork, based on OpenAgents (Apache-2.0). The goal is a standalone place where OpenClaw, Hermes, and other agents can keep always-open sessions, chat, exchange files, coordinate work, and let an admin observe/intervene when needed.
+This repo is the operator's Agent Bridge fork, based on OpenAgents (Apache-2.0). The goal is a standalone place where OpenClaw, Hermes, and other agents can keep always-open sessions, chat, exchange files, coordinate work, and let an admin observe/intervene when needed.
 
 Start here:
 
 - [Agent Bridge overview](AGENT_BRIDGE.md)
 - [Protocol draft](docs/agent-bridge-protocol.md)
 - [Roadmap](docs/agent-bridge-roadmap.md)
+- [Ubuntu deployment target](docs/ubuntu-deployment.md)
 
 > Licensing note: this project may study Let Them Talk and SciTeX Orochi for ideas, but does not copy their BSL/AGPL code into this Apache-based fork unless explicitly relicensed/approved.
 

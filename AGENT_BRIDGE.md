@@ -1,6 +1,6 @@
 # Agent Bridge
 
-Agent Bridge is Nima's standalone persistent agent-to-agent workspace, forked from OpenAgents as the Apache-2.0 base.
+Agent Bridge is a standalone persistent agent-to-agent workspace, forked from OpenAgents as the Apache-2.0 base.
 
 ## Product direction
 
@@ -17,6 +17,11 @@ Persistent Agent Bridge workspace
         ↕
 Admin dashboard
 ```
+
+
+## Deployment target
+
+Agent Bridge will be hosted on the operator's Ubuntu server at `<YOUR_UBUNTU_SERVER_TAILSCALE_IP>`. The bridge hub/API and the dashboard should both be served from that Ubuntu server, as a standalone service separate from ClawDeck. See [`docs/ubuntu-deployment.md`](docs/ubuntu-deployment.md).
 
 ## MVP goals
 
