@@ -241,6 +241,24 @@ class TestSendEvent:
         # list (not missing field, not empty) so legacy clients skip.
         assert data["metadata"].get("target_agents") == ["__no_response__"]
 
+    def test_repeated_long_agent_chat_is_blocked(self, client, workspace):
+        """Exact repeated long agent messages are blocked to prevent watcher loops."""
+        channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "duplicate guard anchor")
+        content = "This is a long repeated agent response that should only appear once in the session, because exact repeats are almost certainly a bad adapter replay loop."
+        payload = {
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": content, "reply_to": anchor_id},
+            "network": workspace["id"],
+        }
+        first = client.post("/v1/events", json=payload, headers={"X-Workspace-Token": workspace["token"]})
+        assert first.status_code == 200
+        second = client.post("/v1/events", json=payload, headers={"X-Workspace-Token": workspace["token"]})
+        assert second.status_code == 400
+        assert "duplicate_agent_message" in second.json()["message"]
+
     def test_member_message_without_mentions_routes_to_master(self, client, workspace):
         """Member agent messages without mentions route back to channel master."""
         # Add a member agent

@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from openagents.core.onm_events import Event, WorkspaceEventTypes
 from openagents.core.onm_mods import EventRejected, PipelineContext, TransformMod
+from app.models import EventRecord
 
 logger = logging.getLogger(__name__)
 
@@ -949,6 +950,47 @@ def _infer_agent_reply_to(event: Event, db, workspace, channel) -> Optional[str]
     return None
 
 
+def _normalize_for_duplicate_check(content: str) -> str:
+    return re.sub(r"\s+", " ", (content or "").strip()).lower()
+
+
+def _reject_repeated_agent_chat(event: Event, db, workspace) -> None:
+    """Block exact repeated long agent chat messages in the same session.
+
+    This is a safety rail for buggy adapters/watchers. A real agent may make
+    the same point twice, but posting the exact same long response repeatedly
+    is almost always a loop/replay bug and makes the shared session unusable.
+    """
+    if not event.source.startswith("openagents:"):
+        return
+    payload = event.payload or {}
+    if payload.get("message_type", "chat") != "chat":
+        return
+    content = str(payload.get("content") or "")
+    normalized = _normalize_for_duplicate_check(content)
+    if len(normalized) < 80:
+        return
+
+    recent = db.execute(
+        select(EventRecord)
+        .where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.type == "workspace.message.posted",
+            EventRecord.source == event.source,
+            EventRecord.target == event.target,
+        )
+        .order_by(EventRecord.timestamp.desc())
+        .limit(50)
+    ).scalars().all()
+
+    for previous in recent:
+        previous_payload = previous.payload or {}
+        if previous_payload.get("message_type", "chat") != "chat":
+            continue
+        if _normalize_for_duplicate_check(str(previous_payload.get("content") or "")) == normalized:
+            raise EventRejected("workspace_mod", "duplicate_agent_message: repeated agent chat blocked")
+
+
 def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
     """Validate and normalize reply metadata for session messages.
 
@@ -1090,6 +1132,7 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     # output is always anchored and auditable instead of floating in the room.
     if event.source.startswith("openagents:"):
         _normalize_reply_to(event, db, workspace, channel)
+        _reject_repeated_agent_chat(event, db, workspace)
 
     # Parse direct agent addressing against the actual joined participants in
     # this channel, not stale workspace defaults. This is the key room/session
