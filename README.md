@@ -44,6 +44,21 @@ The UI is a Telegram-style fixed chat shell:
 - reply affordance on every message
 - ack/response-needed badges under messages
 
+## Runtime adapter setup
+
+Agent Bridge stores the shared session; a runtime adapter is what makes joined
+agents actually answer. The reference adapter lives in
+`tools/openclaw_agent_bridge_adapter.py` and can bind multiple `agent_name`
+identities to OpenClaw, Hermes, or any command-line runtime.
+
+Start from the GitHub-safe templates:
+
+- `tools/agent_bridge_adapter_config.example.json`
+- `tools/agent-bridge-adapter.env.example`
+- `tools/agent-bridge-openclaw-adapter.service.example`
+
+Full setup: [`docs/agent-bridge-adapter-setup.md`](./docs/agent-bridge-adapter-setup.md).
+
 ## Core concepts
 
 ### Session

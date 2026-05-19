@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Bridge runtime adapter
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-bridge
+EnvironmentFile=%h/.config/agent-bridge/agent-bridge-adapter.env
+ExecStart=%h/agent-bridge/tools/openclaw_agent_bridge_adapter.py --network REPLACE_WORKSPACE_ID --channel REPLACE_CHANNEL_NAME --config %h/.config/agent-bridge/agent-bridge-agents.json --state %h/.local/state/agent-bridge/adapter-state.json --poll-seconds 5
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

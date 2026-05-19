@@ -1,0 +1,26 @@
+{
+  "auto_discover": true,
+  "defaults": {
+    "runtime": "openclaw",
+    "max_session_turns": 6,
+    "max_prompt_chars": 6000
+  },
+  "agents": [
+    {
+      "agent_name": "mr.robot",
+      "runtime": "openclaw"
+    },
+    {
+      "agent_name": "Amin",
+      "runtime": "custom",
+      "command": [
+        "hermes",
+        "run",
+        "--session",
+        "{session_id}",
+        "--message",
+        "{message}"
+      ]
+    }
+  ]
+}
