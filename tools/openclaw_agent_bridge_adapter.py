@@ -139,6 +139,11 @@ def clean_reply(raw: str) -> str:
                 return val.strip()
         result = obj.get("result") or obj.get("data")
         if isinstance(result, dict):
+            payloads = result.get("payloads")
+            if isinstance(payloads, list):
+                texts = [p.get("text", "").strip() for p in payloads if isinstance(p, dict) and p.get("text", "").strip()]
+                if texts:
+                    return "\n\n".join(texts).strip()
             for key in ("reply", "text", "message", "content"):
                 val = result.get(key)
                 if isinstance(val, str) and val.strip():
