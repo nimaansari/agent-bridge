@@ -155,8 +155,10 @@ function eventsToMessages(events: EventRecord[]): ChatMessage[] {
     const list = ackMap.get(messageId) || [];
     const existing = list.find((ack) => ack.agentName === agentName);
     if (existing) {
-      existing.status = status;
-      existing.timestamp = event.timestamp;
+      if (event.timestamp >= existing.timestamp) {
+        existing.status = status;
+        existing.timestamp = event.timestamp;
+      }
     } else {
       list.push({ agentName, status, timestamp: event.timestamp });
     }
