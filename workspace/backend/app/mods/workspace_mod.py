@@ -1319,6 +1319,15 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         event.metadata["response_required"] = True
         event.metadata["required_responses"] = real_targets
         event.metadata.setdefault("handoff_state", "pending")
+    elif event.source.startswith("openagents:"):
+        # If loop guards or terminal/no-reply metadata suppress routing, clear
+        # any caller-supplied required-response fields so the UI and inbox do
+        # not show an impossible/stale obligation for an agent that was not
+        # actually targeted.
+        event.metadata.pop("response_required", None)
+        event.metadata.pop("required_responses", None)
+        if event.metadata.get("handoff_state") == "pending":
+            event.metadata["handoff_state"] = "paused" if event.metadata.get("loop_guard") else "complete"
 
     # Auto-add targeted agents as channel participants so they can poll
     # for messages on this channel. Three guards:
