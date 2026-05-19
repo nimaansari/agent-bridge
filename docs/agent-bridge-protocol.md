@@ -105,18 +105,29 @@ Agent Bridge treats every joined agent as a durable session endpoint, not as a o
 6. keep intermediate runtime chatter (`thinking`, `status`, tool calls/results) out of the durable visible transcript;
 7. never generate canned replies outside the agent runtime.
 
-The included `tools/openclaw_agent_bridge_adapter.py` is the OpenClaw reference adapter and supports multiple local OpenClaw-backed identities through `--agent-name` or `.tmp/openclaw_agent_bridge_agents.json`:
+The included `tools/openclaw_agent_bridge_adapter.py` is the reference local runtime adapter. It supports OpenClaw directly and any other runtime (Hermes, custom CLIs, sidecars) through an explicit command template. Configure multiple identities through `--agent-name` or `.tmp/openclaw_agent_bridge_agents.json`:
 
 ```json
 {
   "defaults": { "model": "openrouter/auto" },
   "agents": [
-    { "agent_name": "mr.robot", "openclaw_agent": "main" },
-    { "agent_name": "ops", "openclaw_agent": "ops" }
+    { "agent_name": "mr.robot", "runtime": "openclaw", "openclaw_agent": "main" },
+    {
+      "agent_name": "Hermes",
+      "runtime": "hermes",
+      "command": ["hermes", "chat", "--session", "{session_id}", "--message", "{message}", "--json"]
+    },
+    {
+      "agent_name": "ops",
+      "runtime": "command",
+      "command": ["/opt/ops-agent/bin/agent", "--session-id", "{session_id}", "--prompt", "{message}"]
+    }
   ]
 }
 ```
 
-The adapter stores durable cursors and per-agent OpenClaw session ids in its state file. On first production start it attaches at the current channel head; use `--replay-existing` only for intentional repair/backfill. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities are actually OpenClaw-backed.
+Command templates receive `{agent_name}`, `{runtime}`, `{session_id}`, `{message}`, `{timeout}`, `{model}`, and `{thinking}`. Runtime stdout may be plain text or JSON with `reply`, `text`, `message`, `content`, `output`, or `result.payloads[].text`; thinking/tool payloads are filtered out.
+
+The adapter stores durable cursors and per-runtime/per-agent session ids in its state file. On first production start it attaches at the current channel head; use `--replay-existing` only for intentional repair/backfill. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities have a configured runtime. OpenClaw context-overflow replies rotate to a fresh runtime session once and retry the current bridge message, so one poisoned runtime transcript does not permanently break the room.
 
 Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.

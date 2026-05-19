@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Agent Bridge ↔ OpenClaw session adapter.
+"""Agent Bridge session adapter for local agent runtimes.
 
 Transport adapter, not a chatbot script. Each configured Agent Bridge identity is
-mapped to its own OpenClaw session id. Inbound events targeted to that identity
-are passed to OpenClaw; the OpenClaw reply is posted back with reply anchors and
-terminal acks.
+mapped to its own runtime session id. Inbound events targeted to that identity
+are passed to the configured runtime (OpenClaw, Hermes, or an explicit command);
+the runtime reply is posted back with reply anchors and terminal acks.
 
-This is generic across local OpenClaw-backed agents: add more --agent entries or
-a JSON --config. Agent Bridge itself stays agent-agnostic; every agent connects
-through the same session-adapter contract.
+Agent Bridge itself stays agent-agnostic; every runtime connects through the
+same session-adapter contract.
 """
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,9 +34,13 @@ DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tm
 @dataclass(frozen=True)
 class AgentBinding:
     agent_name: str
+    runtime: str = "openclaw"
     openclaw_agent: str | None = None
     model: str | None = None
     thinking: str | None = None
+    command: list[str] | None = None
+    env: dict[str, str] | None = None
+    session_prefix: str | None = None
     enabled: bool = True
 
 
@@ -64,8 +68,12 @@ def http_json(method: str, url: str, token: str, data: dict[str, Any] | None = N
     body = json.dumps(data).encode() if data is not None else None
     headers = {"X-Workspace-Token": token, "Content-Type": "application/json"}
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:1000]
+        raise RuntimeError(f"HTTP {exc.code} {method} {url}: {detail}") from exc
 
 
 def poll_events(base: str, network: str, channel: str, token: str, after: str | None = None, limit: int = 100) -> dict[str, Any]:
@@ -189,15 +197,57 @@ def clean_reply(raw: str) -> str:
     return raw[-6000:] if len(raw) > 6000 else raw
 
 
-def session_id_for(state: dict[str, Any], network: str, channel: str, agent_name: str) -> str:
-    sessions = state.setdefault("openclaw_sessions", {})
-    if agent_name not in sessions:
-        sessions[agent_name] = slug(f"agent-bridge-{network}-{channel}-{agent_name}")
-    return sessions[agent_name]
+def session_id_for(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
+    runtime = binding.runtime or "openclaw"
+    sessions = state.setdefault("runtime_sessions", {})
+    runtime_sessions = sessions.setdefault(runtime, {})
+    if binding.agent_name not in runtime_sessions:
+        # Preserve the original OpenClaw session id for existing deployments.
+        legacy = (state.get("openclaw_sessions") or {}).get(binding.agent_name)
+        prefix = binding.session_prefix or f"agent-bridge-{runtime}"
+        runtime_sessions[binding.agent_name] = legacy or slug(f"{prefix}-{network}-{channel}-{binding.agent_name}")
+    return runtime_sessions[binding.agent_name]
+
+
+def rotate_session_id(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
+    runtime = binding.runtime or "openclaw"
+    prefix = binding.session_prefix or f"agent-bridge-{runtime}"
+    new_id = slug(f"{prefix}-{network}-{channel}-{binding.agent_name}-{int(time.time())}")
+    state.setdefault("runtime_sessions", {}).setdefault(runtime, {})[binding.agent_name] = new_id
+    if runtime == "openclaw":
+        state.setdefault("openclaw_sessions", {})[binding.agent_name] = new_id
+    return new_id
 
 
 def cursor_key(network: str, channel: str) -> str:
     return f"{network}:{channel}"
+
+
+def run_command(cmd: list[str], timeout: int, extra_env: dict[str, str] | None = None) -> str:
+    env = os.environ.copy()
+    if extra_env:
+        env.update({str(k): str(v) for k, v in extra_env.items()})
+    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"command exited {proc.returncode}").strip())
+    reply = clean_reply(proc.stdout)
+    if not reply:
+        raise RuntimeError("runtime returned an empty reply")
+    return reply
+
+
+def expand_command_template(parts: list[str], binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> list[str]:
+    values = {
+        "agent_name": binding.agent_name,
+        "runtime": binding.runtime,
+        "session_id": session_id,
+        "message": prompt,
+        "prompt": prompt,
+        "timeout": str(timeout),
+        "model": binding.model or "",
+        "thinking": binding.thinking or "",
+    }
+    return [str(part).format(**values) for part in parts]
 
 
 def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
@@ -213,13 +263,35 @@ def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeo
         cmd.extend(["--model", binding.model])
     if binding.thinking:
         cmd.extend(["--thinking", binding.thinking])
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30)
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or f"openclaw exited {proc.returncode}").strip())
-    reply = clean_reply(proc.stdout)
-    if not reply:
-        raise RuntimeError("openclaw returned an empty reply")
-    return reply
+    return run_command(cmd, timeout, binding.env)
+
+
+def run_configured_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
+    runtime = (binding.runtime or "openclaw").lower()
+    if runtime == "openclaw":
+        return run_openclaw_turn(binding, session_id, prompt, timeout)
+    if binding.command:
+        return run_command(expand_command_template(binding.command, binding, session_id, prompt, timeout), timeout, binding.env)
+    raise RuntimeError(
+        f"runtime '{binding.runtime}' for agent '{binding.agent_name}' has no command configured; "
+        "set agents[].command to the runtime CLI template"
+    )
+
+
+def looks_like_context_overflow(reply: str) -> bool:
+    text = (reply or "").lower()
+    return "context overflow" in text or "prompt too large" in text or "context length" in text
+
+
+def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespace, binding: AgentBinding, prompt: str) -> tuple[str, str, bool]:
+    session_id = session_id_for(state, args.network, args.channel, binding)
+    reply = run_configured_turn(binding, session_id, prompt, args.timeout)
+    if (binding.runtime or "openclaw").lower() == "openclaw" and looks_like_context_overflow(reply):
+        session_id = rotate_session_id(state, args.network, args.channel, binding)
+        retry_prompt = prompt + "\n\nNote: this is a fresh runtime session after the previous runtime session exceeded context. Answer the current Agent Bridge message only.\n"
+        reply = run_configured_turn(binding, session_id, retry_prompt, args.timeout)
+        return reply, session_id, True
+    return reply, session_id, False
 
 
 def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
@@ -255,7 +327,7 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
     if auto_discover:
         try:
             for name in discover_channel_agents(args.base, args.network, args.channel, args.token):
-                raw.append({"agent_name": name, **config_defaults})
+                raw.append({**config_defaults, "agent_name": name})
         except Exception as exc:
             print(json.dumps({"warning": "agent_discovery_failed", "error": str(exc)}), file=sys.stderr, flush=True)
     if not raw:
@@ -268,11 +340,18 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
             continue
         seen.add(name)
         merged = {**config_defaults, **item}
+        command = merged.get("command")
+        if isinstance(command, str):
+            command = [command]
         bindings.append(AgentBinding(
             agent_name=name,
+            runtime=merged.get("runtime") or merged.get("driver") or "openclaw",
             openclaw_agent=merged.get("openclaw_agent"),
             model=merged.get("model"),
             thinking=merged.get("thinking"),
+            command=command if isinstance(command, list) else None,
+            env=merged.get("env") if isinstance(merged.get("env"), dict) else None,
+            session_prefix=merged.get("session_prefix"),
             enabled=bool(merged.get("enabled", True)),
         ))
     return bindings
@@ -280,14 +359,17 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
 
 def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: AgentBinding, event: dict[str, Any]) -> None:
     event_id = event["id"]
-    session_id = session_id_for(state, args.network, args.channel, binding.agent_name)
+    session_id = session_id_for(state, args.network, args.channel, binding)
     post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
     post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
     post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
-    reply = run_openclaw_turn(binding, session_id, build_prompt(event, binding), args.timeout)
+    reply, session_id, recovered = run_runtime_turn_with_recovery(state, args, binding, build_prompt(event, binding))
     reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
-    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", f"reply_event_id={reply_event['id']}")
-    print(json.dumps({"agent": binding.agent_name, "handled": event_id, "reply_event_id": reply_event["id"]}), flush=True)
+    detail = f"reply_event_id={reply_event['id']}; runtime={binding.runtime}; session_id={session_id}"
+    if recovered:
+        detail += "; recovered=context_overflow_reset"
+    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
+    print(json.dumps({"agent": binding.agent_name, "runtime": binding.runtime, "handled": event_id, "reply_event_id": reply_event["id"], "session_id": session_id, "recovered": recovered}), flush=True)
 
 
 def mark_processed(state: dict[str, Any], agent_name: str, event_id: str) -> None:
@@ -318,7 +400,7 @@ def maybe_heartbeat(args: argparse.Namespace, state: dict[str, Any], bindings: l
     for binding in bindings:
         if not binding.enabled:
             continue
-        session_id = session_id_for(state, args.network, args.channel, binding.agent_name)
+        session_id = session_id_for(state, args.network, args.channel, binding)
         try:
             post_heartbeat(args.base, args.network, args.token, binding, session_id)
         except Exception as exc:
