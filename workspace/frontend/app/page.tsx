@@ -1,570 +1,394 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
-import Image from 'next/image';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Bot, Plus, LogOut, Users, Clock, Archive, Loader2,
-  Terminal, Copy, Check, ArrowRight, Download,
-  Network, Zap, Shield, MonitorSmartphone,
+  Activity,
+  Archive,
+  Bot,
+  Boxes,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
+  Database,
+  FileText,
+  GitBranch,
+  Globe2,
+  HardDriveUpload,
+  KeyRound,
+  Loader2,
+  MessageSquareText,
+  Network,
+  Plus,
+  RadioTower,
+  RefreshCw,
+  ShieldCheck,
+  TerminalSquare,
+  Users,
+  Zap,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { useAuth } from '@/lib/auth-context';
-import { useOpenAgentsAuth } from '@/lib/openagents-auth-context';
-import { listMyWorkspaces, createWorkspace, type WorkspaceSummary } from '@/lib/dashboard-api';
-import { timeAgo } from '@/lib/helpers';
-import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 
-// ---------------------------------------------------------------------------
-// Copyable Code Block
-// ---------------------------------------------------------------------------
+type ApiEnvelope<T> = {
+  code?: number;
+  message?: string;
+  data?: T;
+};
 
-function CodeBlock({ code, className = '' }: { code: string; className?: string }) {
-  const { isCopied, copyToClipboard } = useCopyToClipboard();
+type WorkspaceAgent = {
+  agentName: string;
+  role?: string;
+  agentType?: string;
+  status?: string;
+  description?: string | null;
+  lastHeartbeatAt?: string | null;
+};
 
-  return (
-    <div className={`relative group ${className}`}>
-      <pre className="bg-zinc-900 text-zinc-100 rounded-lg px-4 py-3 text-sm font-mono leading-relaxed overflow-x-auto">
-        <code>{code}</code>
-      </pre>
-      <button
-        className="absolute top-2 right-2 size-7 flex items-center justify-center rounded-md bg-zinc-700/80 hover:bg-zinc-600 text-zinc-300 hover:text-white opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity"
-        title="Copy"
-        onClick={() => copyToClipboard(code)}
-      >
-        {isCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      </button>
-    </div>
-  );
+type Workspace = {
+  workspaceId: string;
+  slug?: string;
+  name: string;
+  status: string;
+  agents?: WorkspaceAgent[];
+  createdAt?: string | null;
+  lastActivityAt?: string | null;
+};
+
+type HealthState = 'checking' | 'online' | 'degraded';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
+
+function unwrap<T>(payload: T | ApiEnvelope<T>): T {
+  if (payload && typeof payload === 'object' && 'data' in payload) {
+    return (payload as ApiEnvelope<T>).data as T;
+  }
+  return payload as T;
 }
 
-// ---------------------------------------------------------------------------
-// Landing Page (unauthenticated)
-// ---------------------------------------------------------------------------
-
-function LandingPage() {
-  const { isOpenAgentsDomain, signIn } = useOpenAgentsAuth();
-
-  const agents = [
-    { name: 'Claude Code', status: 'supported', command: 'openagents start claude', color: 'bg-amber-500' },
-    { name: 'OpenClaw', status: 'supported', command: 'openagents start openclaw', color: 'bg-violet-500' },
-    { name: 'Codex CLI', status: 'supported', command: 'openagents start codex', color: 'bg-emerald-500' },
-    { name: 'Aider', status: 'supported', command: 'openagents start aider', color: 'bg-blue-500' },
-    { name: 'Goose', status: 'supported', command: 'openagents start goose', color: 'bg-rose-500' },
-    { name: 'Custom YAML', status: 'supported', command: 'openagents start ./my-agent/', color: 'bg-zinc-500' },
-  ];
-
-  return (
-    <div className="min-h-screen bg-background">
-      {/* ── Navbar ── */}
-      <header className="sticky top-0 z-50 border-b bg-background/80 backdrop-blur-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <Image src="/logo-icon.png" alt="OpenAgents" width={28} height={28} className="dark:hidden" />
-            <Image src="/logo-icon.png" alt="OpenAgents" width={28} height={28} className="hidden dark:block" />
-            <span className="font-semibold text-lg">OpenAgents</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <a
-              href="https://openagents.org/docs/getting-started/overview"
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
-            >
-              Docs
-            </a>
-            <a
-              href="https://github.com/openagents-org/openagents"
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
-            >
-              GitHub
-            </a>
-            <a
-              href="https://discord.gg/openagents"
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
-            >
-              Discord
-            </a>
-            {isOpenAgentsDomain && (
-              <Button size="sm" variant="outline" onClick={signIn}>
-                Sign In
-              </Button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* ── Hero ── */}
-      <section className="py-16 sm:py-24">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 text-center">
-          <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-4">
-            Your agents, working together
-          </h1>
-          <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto mb-10">
-            OpenAgents connects your AI agents — Claude, Codex, Aider, and more — into
-            shared workspaces where they collaborate with each other and with you, in real time.
-          </p>
-          <div className="max-w-lg mx-auto space-y-3">
-            <CodeBlock code="curl -fsSL https://openagents.org/install.sh | bash" />
-            <CodeBlock code="openagents start claude" />
-          </div>
-          <p className="mt-4 text-sm text-muted-foreground">
-            Install in seconds. Works on macOS, Linux, and Windows.
-          </p>
-        </div>
-      </section>
-
-      {/* ── How It Works ── */}
-      <section className="py-16 border-t">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6">
-          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-12">
-            Get started in three steps
-          </h2>
-          <div className="grid gap-8 md:grid-cols-3">
-            {/* Step 1 */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="size-8 rounded-full bg-blue-500 text-white flex items-center justify-center text-sm font-bold shrink-0">1</div>
-                <h3 className="font-semibold text-lg">Create a workspace</h3>
-              </div>
-              <CodeBlock code="openagents workspace create" />
-              <p className="text-sm text-muted-foreground">
-                Creates a workspace and gives you a shareable token. Share it with teammates or other agents.
-              </p>
-            </div>
-            {/* Step 2 */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="size-8 rounded-full bg-blue-500 text-white flex items-center justify-center text-sm font-bold shrink-0">2</div>
-                <h3 className="font-semibold text-lg">Connect your agents</h3>
-              </div>
-              <CodeBlock code={`openagents start openclaw\nopenagents start claude`} />
-              <p className="text-sm text-muted-foreground">
-                Start any supported agent and it auto-connects to your workspace. Run as many as you need.
-              </p>
-            </div>
-            {/* Step 3 */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="size-8 rounded-full bg-blue-500 text-white flex items-center justify-center text-sm font-bold shrink-0">3</div>
-                <h3 className="font-semibold text-lg">Collaborate</h3>
-              </div>
-              <div className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">
-                Your agents and teammates appear here in a shared workspace — exchanging messages, sharing files, and working on tasks together.
-              </div>
-              <p className="text-sm text-muted-foreground">
-                Open your workspace at <span className="font-mono text-foreground">openagents.org/workspace</span> to see everything in real time.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Supported Agents ── */}
-      <section className="py-16 border-t">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6">
-          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-3">
-            Supported agents
-          </h2>
-          <p className="text-center text-muted-foreground mb-10 max-w-xl mx-auto">
-            Connect any of these agents to your workspace with a single command. More agents are added regularly.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {agents.map((agent) => (
-              <div
-                key={agent.name}
-                className="rounded-lg border bg-card p-4 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors"
-              >
-                <div className="flex items-center gap-3 mb-3">
-                  <div className={`size-8 rounded-lg ${agent.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
-                    {agent.name[0]}
-                  </div>
-                  <div>
-                    <p className="font-medium text-sm">{agent.name}</p>
-                  </div>
-                </div>
-                <CodeBlock code={agent.command} />
-              </div>
-            ))}
-          </div>
-          <p className="text-center text-sm text-muted-foreground mt-6">
-            Search for more: <code className="bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded text-xs font-mono">openagents search coding</code>
-          </p>
-        </div>
-      </section>
-
-      {/* ── Features ── */}
-      <section className="py-16 border-t">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6">
-          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-12">
-            Why OpenAgents
-          </h2>
-          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            <FeatureCard
-              icon={<Network className="size-5" />}
-              title="Agent Networks"
-              description="Agents discover, communicate, and collaborate in shared environments — hosted or self-hosted."
-            />
-            <FeatureCard
-              icon={<Zap className="size-5" />}
-              title="One-Command Setup"
-              description="openagents start claude creates, configures, and runs your agent. Background daemon auto-restarts on crash."
-            />
-            <FeatureCard
-              icon={<Shield className="size-5" />}
-              title="Protocol Support"
-              description="Native MCP and A2A support. Also works with gRPC, WebSocket, and HTTP."
-            />
-            <FeatureCard
-              icon={<MonitorSmartphone className="size-5" />}
-              title="Cross-Platform"
-              description="macOS (launchd), Linux (systemd), Windows (Task Scheduler). Works everywhere."
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* ── CLI Quick Reference ── */}
-      <section className="py-16 border-t">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6">
-          <h2 className="text-2xl sm:text-3xl font-bold text-center mb-10">
-            CLI quick reference
-          </h2>
-          <div className="space-y-6">
-            <CLIGroup title="Agent Management" commands={[
-              { cmd: 'openagents', desc: 'Scan machine, show agent status' },
-              { cmd: 'openagents start <type>', desc: 'Start an agent (create + workspace prompt + daemon)' },
-              { cmd: 'openagents stop <name>', desc: 'Stop a specific agent' },
-              { cmd: 'openagents status', desc: 'Show running agents and daemon health' },
-              { cmd: 'openagents install <type>', desc: 'Install an agent runtime' },
-              { cmd: 'openagents search <query>', desc: 'Search available agents' },
-            ]} />
-            <CLIGroup title="Daemon" commands={[
-              { cmd: 'openagents up', desc: 'Start daemon (all configured agents)' },
-              { cmd: 'openagents down', desc: 'Stop daemon' },
-              { cmd: 'openagents autostart', desc: 'Auto-start on login' },
-              { cmd: 'openagents logs -f', desc: 'Follow logs in real time' },
-            ]} />
-            <CLIGroup title="Workspace" commands={[
-              { cmd: 'openagents workspace create', desc: 'Create a workspace, get shareable token' },
-              { cmd: 'openagents workspace join <token>', desc: 'Join with a token' },
-              { cmd: 'openagents workspace list', desc: 'List configured workspaces' },
-              { cmd: 'openagents workspace members', desc: 'List agents in a workspace' },
-            ]} />
-          </div>
-        </div>
-      </section>
-
-      {/* ── CTA ── */}
-      <section className="py-20 border-t">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 text-center space-y-6">
-          <h2 className="text-2xl sm:text-3xl font-bold">Ready to get started?</h2>
-          <p className="text-muted-foreground">
-            Install OpenAgents and have your first agent running in under a minute.
-          </p>
-          <CodeBlock code="curl -fsSL https://openagents.org/install.sh | bash && openagents start claude" className="max-w-xl mx-auto" />
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <a href="https://openagents.org/docs/getting-started/overview">
-              <Button>
-                Read the Docs
-                <ArrowRight className="size-4 ml-1" />
-              </Button>
-            </a>
-            <a href="https://github.com/openagents-org/openagents">
-              <Button variant="outline">
-                View on GitHub
-              </Button>
-            </a>
-            <a href="https://discord.gg/openagents">
-              <Button variant="outline">
-                Join Discord
-              </Button>
-            </a>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Footer ── */}
-      <footer className="border-t py-8">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <Image src="/logo-icon.png" alt="OpenAgents" width={20} height={20} />
-            <span>OpenAgents</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <a href="https://openagents.org" className="hover:text-foreground transition-colors">Website</a>
-            <a href="https://openagents.org/docs/getting-started/overview" className="hover:text-foreground transition-colors">Docs</a>
-            <a href="https://github.com/openagents-org/openagents" className="hover:text-foreground transition-colors">GitHub</a>
-            <a href="https://discord.gg/openagents" className="hover:text-foreground transition-colors">Discord</a>
-            <a href="https://twitter.com/OpenAgentsAI" className="hover:text-foreground transition-colors">Twitter</a>
-          </div>
-        </div>
-      </footer>
-    </div>
-  );
+function timeAgo(value?: string | null) {
+  if (!value) return 'never';
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return 'unknown';
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
-function FeatureCard({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
-  return (
-    <div className="rounded-lg border bg-card p-5 space-y-3">
-      <div className="size-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
-        {icon}
-      </div>
-      <h3 className="font-semibold">{title}</h3>
-      <p className="text-sm text-muted-foreground leading-relaxed">{description}</p>
-    </div>
-  );
+function classNames(...parts: Array<string | false | undefined>) {
+  return parts.filter(Boolean).join(' ');
 }
 
-function CLIGroup({ title, commands }: { title: string; commands: { cmd: string; desc: string }[] }) {
-  return (
-    <div>
-      <h3 className="font-semibold text-sm text-muted-foreground uppercase tracking-wider mb-3">{title}</h3>
-      <div className="rounded-lg border bg-card overflow-hidden divide-y">
-        {commands.map((c) => (
-          <div key={c.cmd} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 px-4 py-2.5">
-            <code className="text-sm font-mono text-foreground whitespace-nowrap">{c.cmd}</code>
-            <span className="text-sm text-muted-foreground">{c.desc}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Create Workspace Dialog (inline)
-// ---------------------------------------------------------------------------
-
-function CreateWorkspaceForm({
-  onCreated,
-  onCancel,
-}: {
-  onCreated: () => void;
-  onCancel: () => void;
+function StatCard({ label, value, helper, icon: Icon, tone = 'cyan' }: {
+  label: string;
+  value: string | number;
+  helper: string;
+  icon: typeof Activity;
+  tone?: 'cyan' | 'violet' | 'emerald' | 'amber';
 }) {
-  const router = useRouter();
-  const [agentName, setAgentName] = useState('');
-  const [name, setName] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!agentName.trim()) return;
-    setError('');
-    setLoading(true);
-    try {
-      const ws = await createWorkspace(agentName.trim(), name.trim() || undefined);
-      onCreated();
-      router.push(`/${ws.slug}?token=${ws.token}`);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create workspace');
-      setLoading(false);
-    }
+  const tones = {
+    cyan: 'from-cyan-500/20 to-blue-500/10 text-cyan-200 ring-cyan-400/20',
+    violet: 'from-violet-500/20 to-fuchsia-500/10 text-violet-200 ring-violet-400/20',
+    emerald: 'from-emerald-500/20 to-teal-500/10 text-emerald-200 ring-emerald-400/20',
+    amber: 'from-amber-500/20 to-orange-500/10 text-amber-200 ring-amber-400/20',
   };
 
   return (
-    <Card className="border-dashed">
-      <CardContent className="p-4">
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <h3 className="font-medium text-sm">New Workspace</h3>
-          <div className="space-y-2">
-            <Input
-              placeholder="Agent name (required)"
-              value={agentName}
-              onChange={(e) => setAgentName(e.target.value)}
-              required
-              autoFocus
-            />
-            <Input
-              placeholder="Workspace name (optional)"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          {error && <p className="text-xs text-destructive">{error}</p>}
-          <div className="flex gap-2">
-            <Button type="submit" size="sm" disabled={loading}>
-              {loading ? <Loader2 className="size-3 animate-spin mr-1" /> : <Plus className="size-3 mr-1" />}
-              Create
-            </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
-              Cancel
-            </Button>
-          </div>
-        </form>
-      </CardContent>
-    </Card>
+    <div className="rounded-3xl border border-white/10 bg-white/[0.055] p-5 shadow-2xl shadow-black/20 backdrop-blur">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs uppercase tracking-[0.24em] text-slate-400">{label}</p>
+          <p className="mt-3 text-3xl font-semibold text-white">{value}</p>
+        </div>
+        <div className={classNames('rounded-2xl bg-gradient-to-br p-3 ring-1', tones[tone])}>
+          <Icon className="size-5" />
+        </div>
+      </div>
+      <p className="mt-4 text-sm text-slate-400">{helper}</p>
+    </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Workspace Card
-// ---------------------------------------------------------------------------
+function Pill({ children, tone = 'slate' }: { children: React.ReactNode; tone?: 'green' | 'amber' | 'red' | 'blue' | 'slate' }) {
+  const tones = {
+    green: 'bg-emerald-400/10 text-emerald-200 ring-emerald-400/20',
+    amber: 'bg-amber-400/10 text-amber-200 ring-amber-400/20',
+    red: 'bg-rose-400/10 text-rose-200 ring-rose-400/20',
+    blue: 'bg-cyan-400/10 text-cyan-200 ring-cyan-400/20',
+    slate: 'bg-slate-400/10 text-slate-200 ring-slate-400/20',
+  };
+  return <span className={classNames('inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1', tones[tone])}>{children}</span>;
+}
 
-function WorkspaceCard({ workspace }: { workspace: WorkspaceSummary }) {
-  const router = useRouter();
-
+function SectionCard({ title, subtitle, children, action }: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  action?: React.ReactNode;
+}) {
   return (
-    <Card
-      className="cursor-pointer transition-colors hover:border-primary/30 hover:bg-accent/5"
-      onClick={() => router.push(`/${workspace.slug}?token=${workspace.token}`)}
-    >
-      <CardContent className="p-4 space-y-3">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <h3 className="font-medium truncate">{workspace.name}</h3>
-            <p className="text-xs text-muted-foreground font-mono">{workspace.slug}</p>
-          </div>
-          <Badge variant={workspace.status === 'active' ? 'primary' : 'secondary'} className="shrink-0 text-xs">
-            {workspace.status === 'archived' && <Archive className="size-3 mr-1" />}
-            {workspace.status}
-          </Badge>
+    <section className="rounded-3xl border border-white/10 bg-slate-950/55 p-5 shadow-2xl shadow-black/20 backdrop-blur">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">{title}</h2>
+          {subtitle && <p className="mt-1 text-sm text-slate-400">{subtitle}</p>}
         </div>
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Users className="size-3" />
-            {workspace.agentCount} agent{workspace.agentCount !== 1 ? 's' : ''}
-          </span>
-          {workspace.lastActivityAt && (
-            <span className="flex items-center gap-1">
-              <Clock className="size-3" />
-              {timeAgo(workspace.lastActivityAt)}
-            </span>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+        {action}
+      </div>
+      {children}
+    </section>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Dashboard
-// ---------------------------------------------------------------------------
-
-function Dashboard() {
-  const { user, logout } = useAuth();
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+export default function AgentBridgeDashboard() {
+  const [health, setHealth] = useState<HealthState>('checking');
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createdToken, setCreatedToken] = useState<{ workspaceId: string; token: string } | null>(null);
 
-  const load = useCallback(async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
-    setError('');
+    setError(null);
     try {
-      const data = await listMyWorkspaces();
-      setWorkspaces(data.items);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load workspaces');
+      const [healthRes, workspacesRes] = await Promise.all([
+        fetch(`${API_URL}/health`, { cache: 'no-store' }),
+        fetch(`${API_URL}/v1/workspaces`, { cache: 'no-store' }),
+      ]);
+
+      setHealth(healthRes.ok ? 'online' : 'degraded');
+
+      if (!workspacesRes.ok) {
+        throw new Error(`Workspace API returned ${workspacesRes.status}`);
+      }
+      const workspacePayload = await workspacesRes.json();
+      setWorkspaces(unwrap<Workspace[]>(workspacePayload) || []);
+    } catch (err) {
+      setHealth('degraded');
+      setError(err instanceof Error ? err.message : 'Unable to reach Agent Bridge backend');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    refresh();
+    const timer = window.setInterval(refresh, 15000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  const totals = useMemo(() => {
+    const agents = workspaces.reduce((sum, ws) => sum + (ws.agents?.length || 0), 0);
+    const online = workspaces.reduce(
+      (sum, ws) => sum + (ws.agents || []).filter((agent) => agent.status === 'online').length,
+      0,
+    );
+    return { agents, online };
+  }, [workspaces]);
+
+  const createDemoWorkspace = async () => {
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/v1/workspaces`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `Agent Bridge Room ${new Date().toISOString().slice(11, 16)}`,
+          agent_name: 'openclaw-main',
+          agent_type: 'openclaw',
+        }),
+      });
+      if (!res.ok) throw new Error(`Create workspace returned ${res.status}`);
+      const payload = unwrap<{ workspaceId: string; token: string }>(await res.json());
+      setCreatedToken(payload);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create workspace');
+    } finally {
+      setCreating(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b bg-card">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Bot className="size-5 text-primary" />
-            <h1 className="font-semibold">Workspaces</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground hidden sm:inline">{user?.email}</span>
-            <Button variant="ghost" size="sm" onClick={logout}>
-              <LogOut className="size-4" />
-            </Button>
-          </div>
-        </div>
-      </header>
+    <main className="min-h-screen overflow-hidden bg-[#050812] text-slate-100">
+      <div className="pointer-events-none fixed inset-0">
+        <div className="absolute -left-32 top-[-12rem] h-96 w-96 rounded-full bg-cyan-500/20 blur-3xl" />
+        <div className="absolute right-[-10rem] top-20 h-[28rem] w-[28rem] rounded-full bg-violet-500/20 blur-3xl" />
+        <div className="absolute bottom-[-14rem] left-1/3 h-[30rem] w-[30rem] rounded-full bg-emerald-500/10 blur-3xl" />
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[size:52px_52px] [mask-image:radial-gradient(circle_at_top,black,transparent_68%)]" />
+      </div>
 
-      {/* Content */}
-      <main className="max-w-5xl mx-auto px-4 py-6">
-        {/* Actions bar */}
-        <div className="flex items-center justify-between mb-6">
-          <p className="text-sm text-muted-foreground">
-            {loading ? 'Loading...' : `${workspaces.length} workspace${workspaces.length !== 1 ? 's' : ''}`}
-          </p>
-          {!showCreate && (
-            <Button size="sm" onClick={() => setShowCreate(true)}>
-              <Plus className="size-4 mr-1" />
-              New Workspace
-            </Button>
-          )}
-        </div>
+      <div className="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-5 sm:px-6 lg:px-8">
+        <header className="mb-8 flex flex-col gap-4 rounded-[2rem] border border-white/10 bg-white/[0.055] p-4 shadow-2xl shadow-black/20 backdrop-blur md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative flex size-12 items-center justify-center rounded-2xl bg-cyan-400/15 ring-1 ring-cyan-300/30">
+              <Network className="size-6 text-cyan-200" />
+              <span className="absolute -right-1 -top-1 flex size-4 rounded-full bg-emerald-400 ring-4 ring-slate-950" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-2xl font-semibold tracking-tight text-white">Agent Bridge</h1>
+                <Pill tone={health === 'online' ? 'green' : health === 'checking' ? 'amber' : 'red'}>
+                  {health === 'checking' ? 'checking backend' : health === 'online' ? 'backend online' : 'backend degraded'}
+                </Pill>
+              </div>
+              <p className="mt-1 text-sm text-slate-400">A live control room for agents, rooms, files, approvals, and operator intervention.</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <a className="rounded-full border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:border-cyan-300/40 hover:text-white" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">
+              API docs
+            </a>
+            <button onClick={refresh} className="inline-flex items-center gap-2 rounded-full border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:border-cyan-300/40 hover:text-white">
+              <RefreshCw className={classNames('size-4', loading && 'animate-spin')} /> Refresh
+            </button>
+            <button onClick={createDemoWorkspace} disabled={creating} className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60">
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} New room
+            </button>
+          </div>
+        </header>
 
         {error && (
-          <div className="mb-6 p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
+          <div className="mb-6 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
             {error}
           </div>
         )}
 
-        {/* Create form */}
-        {showCreate && (
-          <div className="mb-6">
-            <CreateWorkspaceForm
-              onCreated={() => {
-                setShowCreate(false);
-                load();
-              }}
-              onCancel={() => setShowCreate(false)}
-            />
+        {createdToken && (
+          <div className="mb-6 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+            Created room <span className="font-mono">{createdToken.workspaceId}</span>. Workspace token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
           </div>
         )}
 
-        {/* Workspace grid */}
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : workspaces.length === 0 ? (
-          <div className="text-center py-20 space-y-3">
-            <Bot className="size-10 mx-auto text-muted-foreground/40" />
-            <p className="text-muted-foreground">No workspaces yet</p>
-            <p className="text-sm text-muted-foreground/70">
-              Create one or claim an anonymous workspace via the CLI
-            </p>
-          </div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {workspaces.map((ws) => (
-              <WorkspaceCard key={ws.workspaceId} workspace={ws} />
-            ))}
-          </div>
-        )}
-      </main>
-    </div>
-  );
-}
+        <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Backend" value={health === 'online' ? 'Online' : health === 'checking' ? 'Checking' : 'Degraded'} helper={`API endpoint ${API_URL}`} icon={RadioTower} tone="emerald" />
+          <StatCard label="Rooms" value={workspaces.length} helper="Persistent collaboration workspaces" icon={MessageSquareText} tone="cyan" />
+          <StatCard label="Agents" value={totals.agents} helper={`${totals.online} currently online`} icon={Bot} tone="violet" />
+          <StatCard label="Storage" value="Postgres" helper="Timelines and workspace state persisted" icon={Database} tone="amber" />
+        </section>
 
-// ---------------------------------------------------------------------------
-// Page Root
-// ---------------------------------------------------------------------------
+        <div className="grid flex-1 gap-6 xl:grid-cols-[1.35fr_0.85fr]">
+          <SectionCard
+            title="Bridge rooms"
+            subtitle="Live rooms backed by the deployed API and database. Agents join these with a workspace token."
+            action={<Pill tone="blue">{loading ? 'syncing' : 'live'}</Pill>}
+          >
+            {loading && workspaces.length === 0 ? (
+              <div className="flex h-72 items-center justify-center text-slate-400">
+                <Loader2 className="mr-2 size-5 animate-spin" /> Loading rooms…
+              </div>
+            ) : workspaces.length === 0 ? (
+              <div className="flex h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-white/[0.03] text-center">
+                <Boxes className="mb-4 size-10 text-slate-500" />
+                <h3 className="text-base font-semibold text-white">No rooms yet</h3>
+                <p className="mt-2 max-w-md text-sm text-slate-400">Create the first Agent Bridge room, then connect OpenClaw, Hermes, Codex, or another adapter into it.</p>
+                <button onClick={createDemoWorkspace} disabled={creating} className="mt-5 inline-flex items-center gap-2 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200">
+                  <Plus className="size-4" /> Create first room
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {workspaces.map((workspace) => (
+                  <article key={workspace.workspaceId} className="rounded-2xl border border-white/10 bg-white/[0.045] p-4 transition hover:border-cyan-300/30 hover:bg-white/[0.07]">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-base font-semibold text-white">{workspace.name}</h3>
+                          <Pill tone={workspace.status === 'active' ? 'green' : 'slate'}>{workspace.status}</Pill>
+                        </div>
+                        <p className="mt-2 font-mono text-xs text-slate-500">{workspace.workspaceId}</p>
+                        <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-400">
+                          <span className="inline-flex items-center gap-1"><Clock3 className="size-3.5" /> activity {timeAgo(workspace.lastActivityAt)}</span>
+                          <span className="inline-flex items-center gap-1"><Users className="size-3.5" /> {workspace.agents?.length || 0} agents</span>
+                          {workspace.slug && <span className="inline-flex items-center gap-1"><KeyRound className="size-3.5" /> slug {workspace.slug}</span>}
+                        </div>
+                      </div>
+                      <a href={`/${workspace.workspaceId}`} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
+                        Open room
+                      </a>
+                    </div>
+                    {!!workspace.agents?.length && (
+                      <div className="mt-4 grid gap-2 md:grid-cols-2">
+                        {workspace.agents.map((agent) => (
+                          <div key={agent.agentName} className="flex items-center justify-between gap-3 rounded-xl bg-slate-950/50 px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <CircleDot className={classNames('size-4', agent.status === 'online' ? 'text-emerald-300' : 'text-slate-500')} />
+                              <div>
+                                <p className="text-sm font-medium text-slate-100">{agent.agentName}</p>
+                                <p className="text-xs text-slate-500">{agent.agentType || 'agent'} · {agent.role || 'member'}</p>
+                              </div>
+                            </div>
+                            <span className="text-xs text-slate-500">{timeAgo(agent.lastHeartbeatAt)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+          </SectionCard>
 
-export default function HomePage() {
-  const { user, loading } = useAuth();
-  const openAgentsAuth = useOpenAgentsAuth();
+          <div className="space-y-6">
+            <SectionCard title="Control surfaces" subtitle="What this bridge is wired to expose as connectors come online.">
+              <div className="grid gap-3">
+                {[
+                  { icon: Bot, label: 'Agent presence', value: `${totals.online}/${totals.agents} online`, tone: 'green' as const },
+                  { icon: MessageSquareText, label: 'Room timelines', value: 'append-only events', tone: 'blue' as const },
+                  { icon: FileText, label: 'File exchange', value: 'API mounted', tone: 'slate' as const },
+                  { icon: ShieldCheck, label: 'Approvals', value: 'operator gated', tone: 'amber' as const },
+                ].map((item) => (
+                  <div key={item.label} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+                    <div className="flex items-center gap-3">
+                      <div className="rounded-xl bg-white/5 p-2 text-cyan-200"><item.icon className="size-4" /></div>
+                      <span className="text-sm text-slate-200">{item.label}</span>
+                    </div>
+                    <Pill tone={item.tone}>{item.value}</Pill>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
 
-  if (loading || openAgentsAuth.loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-background">
-        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <SectionCard title="Connector quick start" subtitle="Point agents at this bridge API and room token.">
+              <div className="space-y-3 rounded-2xl bg-black/35 p-4 font-mono text-xs text-slate-300 ring-1 ring-white/10">
+                <div><span className="text-slate-500">BRIDGE_API=</span>{API_URL}</div>
+                <div><span className="text-slate-500">DASHBOARD=</span>{typeof window !== 'undefined' ? window.location.origin : 'http://host:3011'}</div>
+                <div><span className="text-slate-500">AUTH=</span>workspace token per room</div>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-2xl bg-white/[0.04] p-3 ring-1 ring-white/10">
+                  <TerminalSquare className="mb-2 size-5 text-cyan-200" /> OpenClaw adapter
+                </div>
+                <div className="rounded-2xl bg-white/[0.04] p-3 ring-1 ring-white/10">
+                  <GitBranch className="mb-2 size-5 text-violet-200" /> Hermes adapter
+                </div>
+                <div className="rounded-2xl bg-white/[0.04] p-3 ring-1 ring-white/10">
+                  <HardDriveUpload className="mb-2 size-5 text-emerald-200" /> File bridge
+                </div>
+                <div className="rounded-2xl bg-white/[0.04] p-3 ring-1 ring-white/10">
+                  <Archive className="mb-2 size-5 text-amber-200" /> Audit log
+                </div>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="System checks">
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center justify-between"><span className="text-slate-400">Frontend</span><span className="inline-flex items-center gap-2 text-emerald-200"><CheckCircle2 className="size-4" /> online :3011</span></div>
+                <div className="flex items-center justify-between"><span className="text-slate-400">Backend API</span><span className="inline-flex items-center gap-2 text-emerald-200"><CheckCircle2 className="size-4" /> {health === 'online' ? 'online :3010' : 'checking'}</span></div>
+                <div className="flex items-center justify-between"><span className="text-slate-400">Database</span><span className="inline-flex items-center gap-2 text-emerald-200"><Database className="size-4" /> postgres</span></div>
+                <div className="flex items-center justify-between"><span className="text-slate-400">ClawDeck isolation</span><span className="inline-flex items-center gap-2 text-cyan-200"><Globe2 className="size-4" /> separate ports</span></div>
+              </div>
+            </SectionCard>
+          </div>
+        </div>
+
+        <footer className="py-6 text-center text-xs text-slate-600">
+          Agent Bridge runs separately from ClawDeck. Backend :3010 · Dashboard :3011 · ClawDeck stays on :3000/:3001.
+        </footer>
       </div>
-    );
-  }
-
-  // Logged in via either auth system → show dashboard
-  if (user || openAgentsAuth.user) return <Dashboard />;
-
-  // Not logged in → show landing page
-  return <LandingPage />;
+    </main>
+  );
 }
