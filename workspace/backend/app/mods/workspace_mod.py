@@ -884,6 +884,8 @@ async def _route_with_llm(channel, new_event: Event, db, workspace) -> List[str]
 
 
 _DEFAULT_TITLES = {"New Thread", "Session 1", None, ""}
+_DEFAULT_AGENT_REPLY_BUDGET = 2
+_TERMINAL_AGENT_STATUSES = {"done", "blocked", "need_input", "needs_user", "failed", "cancelled"}
 
 
 def _auto_title_channel(channel, content: str, db) -> None:
@@ -1072,6 +1074,65 @@ def _reply_target_agent(quote: Optional[dict]) -> Optional[str]:
     return source[len("openagents:"):] if source.startswith("openagents:") else None
 
 
+def _metadata_bool(metadata: dict, key: str) -> Optional[bool]:
+    if key not in metadata:
+        return None
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _agent_reply_budget(workspace) -> int:
+    settings = workspace.settings or {}
+    value = settings.get("agent_reply_budget") or settings.get("max_agent_reply_depth")
+    try:
+        return max(0, int(value))
+    except Exception:
+        return _DEFAULT_AGENT_REPLY_BUDGET
+
+
+def _agent_reply_depth_for_new_message(quote: Optional[dict], db, workspace) -> int:
+    """Depth of consecutive agent→agent replies for the new message.
+
+    Human messages reset the depth. Agent messages replying to another agent
+    increment from the replied-to message's stored depth. This keeps real
+    collaboration possible while bounding autonomous back-and-forth loops.
+    """
+    if not _reply_target_agent(quote):
+        return 0
+    from app.models import EventRecord
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == quote.get("id"),
+        )
+    ).scalar_one_or_none()
+    if not original or not original.source.startswith("openagents:"):
+        return 0
+    try:
+        return int((original.metadata_ or {}).get("agent_reply_depth") or 0) + 1
+    except Exception:
+        return 1
+
+
+def _agent_message_terminal(content: str, metadata: dict) -> bool:
+    if _metadata_bool(metadata, "needs_reply") is False:
+        return True
+    status = str(metadata.get("status") or metadata.get("handoff_status") or "").strip().lower()
+    if status in _TERMINAL_AGENT_STATUSES:
+        return True
+    first_line = (content or "").strip().splitlines()[0].strip().lower() if (content or "").strip() else ""
+    first_token = first_line.split(None, 1)[0].rstrip(":-—") if first_line else ""
+    return first_token in _TERMINAL_AGENT_STATUSES
+
+
 async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional[Event]:
     """
     workspace.message.posted → route messages to the right agents.
@@ -1175,6 +1236,10 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         # "yes" or "fix this".
         reply_quote = _normalize_reply_to(event, db, workspace, channel, required=False)
     reply_target = _reply_target_agent(reply_quote)
+    agent_reply_depth = 0
+    if event.source.startswith("openagents:"):
+        agent_reply_depth = _agent_reply_depth_for_new_message(reply_quote, db, workspace)
+        event.metadata["agent_reply_depth"] = agent_reply_depth
 
     # Parse direct agent addressing against the actual joined participants in
     # this channel, not stale workspace defaults. This is the key room/session
@@ -1233,6 +1298,20 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     if event.source.startswith("openagents:"):
         sender_name = event.source[len("openagents:"):]
         targets = [agent_name for agent_name in targets if agent_name != sender_name]
+
+        budget = _agent_reply_budget(workspace)
+        needs_reply = _metadata_bool(event.metadata, "needs_reply")
+        terminal = _agent_message_terminal(content, event.metadata)
+        if terminal:
+            targets = []
+            event.metadata["loop_guard"] = "terminal_no_reply"
+        elif reply_target and agent_reply_depth > budget:
+            targets = []
+            event.metadata["loop_guard"] = "reply_budget_exceeded"
+            event.metadata["agent_reply_budget"] = budget
+        elif needs_reply is False:
+            targets = []
+            event.metadata["loop_guard"] = "needs_reply_false"
 
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
     real_targets = [agent_name for agent_name in event.metadata["target_agents"] if agent_name != "__no_response__"]
