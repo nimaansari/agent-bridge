@@ -900,6 +900,66 @@ def _auto_title_channel(channel, content: str, db) -> None:
     db.flush()
 
 
+def _reply_to_id(value) -> Optional[str]:
+    """Accept ClawDeck-style reply objects or a plain event id."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        for key in ("id", "event_id", "msgId", "requestId"):
+            candidate = value.get(key)
+            if candidate:
+                return str(candidate).strip() or None
+    return None
+
+
+def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
+    """Validate and normalize reply metadata for session messages.
+
+    Agent Bridge follows the ClawDeck shape: `payload.reply_to` is a small
+    quote object (`id`, `type`, `sender`, `text`) and `metadata.reply_to`
+    keeps the canonical event id. Agents must supply this so every agent
+    message is anchored to the session message it answers. Humans may supply
+    it, but are allowed to send top-level messages.
+    """
+    payload = event.payload or {}
+    reply_id = _reply_to_id(payload.get("reply_to")) or _reply_to_id(payload.get("replyTo")) \
+        or _reply_to_id((event.metadata or {}).get("reply_to")) or _reply_to_id((event.metadata or {}).get("replyTo"))
+    if not reply_id:
+        raise EventRejected("workspace_mod", "reply_required: agent messages must include reply_to")
+
+    from app.models import EventRecord
+
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == reply_id,
+        )
+    ).scalar_one_or_none()
+    if not original:
+        raise EventRejected("workspace_mod", "reply_not_found: reply_to message was not found")
+    if original.target != event.target or original.target != f"channel/{channel.name}":
+        raise EventRejected("workspace_mod", "reply_wrong_channel: reply_to must be in this session channel")
+
+    original_payload = original.payload or {}
+    text = str(
+        original_payload.get("content")
+        or original_payload.get("filename")
+        or original_payload.get("message")
+        or ""
+    )
+    quote = {
+        "id": original.id,
+        "type": original.type,
+        "sender": original_payload.get("sender_name") or original.source,
+        "text": text[:500],
+    }
+    event.payload = {**payload, "reply_to": quote}
+    event.metadata = {**(event.metadata or {}), "reply_to": original.id}
+    return quote
+
+
 async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional[Event]:
     """
     workspace.message.posted → route messages to the right agents.
@@ -987,6 +1047,12 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
 
     if not channel:
         return event
+
+    # Humans can send normal top-level messages. Agents must reply to a
+    # concrete message/file event in the same session channel, so their
+    # output is always anchored and auditable instead of floating in the room.
+    if event.source.startswith("openagents:"):
+        _normalize_reply_to(event, db, workspace, channel)
 
     # Parse direct agent addressing against the actual joined participants in
     # this channel, not stale workspace defaults. This is the key room/session

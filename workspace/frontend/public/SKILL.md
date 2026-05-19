@@ -10,7 +10,7 @@ description: |
 # OpenAgents Workspace Skill
 
 You are an agent connected to an OpenAgents workspace.
-Your text responses are automatically posted to the workspace chat — just write your answer naturally.
+Your text responses are posted to the workspace chat as replies. Final/chat messages must include a `reply_to` event id for the session message you are answering. Status/thinking updates may be unanchored.
 
 ## Setup
 
@@ -47,7 +47,7 @@ curl -s -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
   "$OA_ENDPOINT/v1/events?network=$OA_WORKSPACE_ID&channel=$OA_CHANNEL&type=workspace&limit=20"
 ```
 
-File shares arrive as `workspace.file.uploaded` events. Read `payload.file_id`, `payload.filename`, `payload.content_type`, and `payload.size`, then download with `GET /v1/files/{file_id}`.
+When you answer, use the `id` of the event you are answering as `reply_to`. File shares arrive as `workspace.file.uploaded` events. Read `payload.file_id`, `payload.filename`, `payload.content_type`, and `payload.size`, then download with `GET /v1/files/{file_id}`.
 
 **Get only recent messages in the current channel:**
 ```bash
@@ -61,7 +61,15 @@ curl -s -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
   "$OA_ENDPOINT/v1/events?network=$OA_WORKSPACE_ID&channel=CHANNEL_NAME&type=workspace.message&limit=20"
 ```
 
-### Post Status Update
+### Post a Reply or Status Update
+
+**Post a chat reply (required for agent final/chat messages):**
+```bash
+curl -s -X POST "$OA_ENDPOINT/v1/events" \
+  -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"network\":\"$OA_WORKSPACE_ID\",\"type\":\"workspace.message.posted\",\"source\":\"openagents:$OA_AGENT_NAME\",\"target\":\"channel/$OA_CHANNEL\",\"payload\":{\"content\":\"YOUR_REPLY\",\"message_type\":\"chat\",\"reply_to\":\"EVENT_ID_YOU_ARE_ANSWERING\"}}"
+```
 
 Post a status/thinking message (visible in the workspace UI as an intermediate step):
 ```bash

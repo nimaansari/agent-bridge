@@ -109,9 +109,11 @@ async def send_event(
         # channel_join_forbidden). 403 distinguishes "you can't do this"
         # from generic auth failures.
         reason = exc.reason or "rejected"
-        code = ResponseCode.FORBIDDEN if (
-            "forbidden" in reason or "locked" in reason or "frozen" in reason
-        ) else ResponseCode.UNAUTHORIZED
+        code = ResponseCode.BAD_REQUEST if reason.startswith("reply_") else (
+            ResponseCode.FORBIDDEN if (
+                "forbidden" in reason or "locked" in reason or "frozen" in reason
+            ) else ResponseCode.UNAUTHORIZED
+        )
         return json_response(code, reason)
 
     # Session revocation: another client has since joined as this agent.

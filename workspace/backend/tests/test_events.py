@@ -6,6 +6,19 @@ Tests for the event-native API (POST/GET /v1/events).
 import pytest
 
 
+def _anchor_event_id(client, workspace, channel_name, content="anchor"):
+    """Create a human message agents can reply to."""
+    resp = client.post("/v1/events", json={
+        "type": "workspace.message.posted",
+        "source": "human:user1",
+        "target": f"channel/{channel_name}",
+        "payload": {"content": content},
+        "network": workspace["id"],
+    }, headers={"X-Workspace-Token": workspace["token"]})
+    assert resp.status_code == 200
+    return resp.json()["data"]["id"]
+
+
 class TestSendEvent:
     """POST /v1/events — send events through the pipeline."""
 
@@ -62,7 +75,7 @@ class TestSendEvent:
         channel_name = workspace["channel"]["name"]
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
-            "source": "openagents:agent-alpha",
+            "source": "human:user1",
             "target": f"channel/{channel_name}",
             "payload": {"content": "test"},
             "network": workspace["id"],
@@ -84,7 +97,7 @@ class TestSendEvent:
         channel_name = workspace["channel"]["name"]
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
-            "source": "openagents:agent-alpha",
+            "source": "human:user1",
             "target": f"channel/{channel_name}",
             "payload": {"content": "test"},
             "metadata": {"custom_key": "custom_value"},
@@ -94,6 +107,43 @@ class TestSendEvent:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["metadata"]["custom_key"] == "custom_value"
+
+    def test_agent_chat_requires_reply_to(self, client, workspace):
+        """Agent final/chat messages must be anchored to a session message."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "floating answer", "message_type": "chat"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 400
+        assert "reply_required" in resp.json()["message"]
+
+    def test_agent_chat_reply_to_is_normalized(self, client, workspace):
+        """Plain reply_to ids become ClawDeck-style quote objects in payload."""
+        channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Question for the agent")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Anchored answer", "reply_to": anchor_id},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["reply_to"] == anchor_id
+
+        poll = client.get("/v1/events", params={"network": workspace["id"], "target": f"channel/{channel_name}"},
+                          headers={"X-Workspace-Token": workspace["token"]})
+        events = poll.json()["data"]["events"]
+        reply = next(e for e in events if e["id"] == data["id"])
+        assert reply["payload"]["reply_to"]["id"] == anchor_id
+        assert reply["payload"]["reply_to"]["text"] == "Question for the agent"
 
     def test_human_message_routes_to_master(self, client, workspace):
         """Human messages are routed to the channel master agent."""
@@ -125,6 +175,7 @@ class TestSendEvent:
         broadcast-to-all on missing field.
         """
         channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name)
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "openagents:agent-alpha",
@@ -132,6 +183,7 @@ class TestSendEvent:
             "payload": {
                 "content": "@agent-beta please review the code",
                 "message_type": "chat",
+                "reply_to": anchor_id,
             },
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
@@ -145,11 +197,12 @@ class TestSendEvent:
     def test_master_message_without_mentions_no_target_agents(self, client, workspace):
         """Master agent messages without mentions produce empty target_agents (no self-trigger)."""
         channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name)
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "openagents:agent-alpha",  # agent-alpha is the channel master
             "target": f"channel/{channel_name}",
-            "payload": {"content": "Just a status update"},
+            "payload": {"content": "Just a status update", "reply_to": anchor_id},
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
 
@@ -169,11 +222,12 @@ class TestSendEvent:
         })
 
         channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name)
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "openagents:agent-beta",  # member, not master
             "target": f"channel/{channel_name}",
-            "payload": {"content": "I finished the task."},
+            "payload": {"content": "I finished the task.", "reply_to": anchor_id},
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
 
@@ -193,11 +247,12 @@ class TestSendEvent:
             })
 
         channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name)
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "openagents:agent-beta",
             "target": f"channel/{channel_name}",
-            "payload": {"content": "@agent-gamma can you review this?"},
+            "payload": {"content": "@agent-gamma can you review this?", "reply_to": anchor_id},
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
 
@@ -310,7 +365,7 @@ class TestPollEvents:
         # Send an event
         client.post("/v1/events", json={
             "type": "workspace.message.posted",
-            "source": "openagents:agent-alpha",
+            "source": "human:user1",
             "target": f"channel/{channel_name}",
             "payload": {"content": "msg1"},
             "network": workspace["id"],
@@ -331,7 +386,7 @@ class TestPollEvents:
         for etype in ("workspace.message.posted", "workspace.session.created"):
             client.post("/v1/events", json={
                 "type": etype,
-                "source": "openagents:agent-alpha",
+                "source": "human:user1",
                 "target": f"channel/{channel_name}",
                 "payload": {},
                 "network": workspace["id"],
@@ -351,7 +406,7 @@ class TestPollEvents:
         channel_name = workspace["channel"]["name"]
         client.post("/v1/events", json={
             "type": "workspace.message.posted",
-            "source": "openagents:agent-alpha",
+            "source": "human:user1",
             "target": f"channel/{channel_name}",
             "payload": {},
             "network": workspace["id"],
@@ -380,7 +435,7 @@ class TestPollEvents:
         for i in range(3):
             resp = client.post("/v1/events", json={
                 "type": "workspace.message.posted",
-                "source": "openagents:agent-alpha",
+                "source": "human:user1",
                 "target": f"channel/{channel_name}",
                 "payload": {"content": f"msg{i}"},
                 "network": workspace["id"],

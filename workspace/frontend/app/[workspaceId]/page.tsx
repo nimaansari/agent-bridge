@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Send, Snowflake, User, X } from 'lucide-react';
+import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, Snowflake, User, X } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
 
@@ -38,6 +38,7 @@ type EventRecord = {
   source: string;
   target: string;
   payload: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
   timestamp: number;
 };
 type ChatMessage = {
@@ -47,6 +48,14 @@ type ChatMessage = {
   content: string;
   timestamp: number;
   attachments: Attachment[];
+  replyTo: ReplyTo | null;
+};
+
+type ReplyTo = {
+  id: string;
+  type?: string;
+  sender?: string;
+  text: string;
 };
 
 type Attachment = {
@@ -91,6 +100,10 @@ function pickRoomChannel(channels: Channel[], currentChannel: string, workspaceI
 
 function eventToMessage(event: EventRecord): ChatMessage {
   const payload = event.payload || {};
+  const rawReply = payload.reply_to || payload.replyTo;
+  const replyTo = rawReply && typeof rawReply === 'object'
+    ? rawReply as ReplyTo
+    : null;
   const attachments = Array.isArray(payload.attachments)
     ? (payload.attachments as Attachment[])
     : payload.file_id
@@ -114,6 +127,7 @@ function eventToMessage(event: EventRecord): ChatMessage {
     content,
     timestamp: event.timestamp,
     attachments,
+    replyTo,
   };
 }
 
@@ -190,6 +204,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [roomNameDraft, setRoomNameDraft] = useState('');
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState('');
+  const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -318,6 +333,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       '',
       'Use the repo/path I give you, connect to this session, then send one short hello message in the chat.',
       'Important: answer and talk inside this session. Keep replies visible in the chatbox.',
+      'Agent chat messages must reply to a specific session event: include payload.reply_to (or metadata.reply_to) with the event id you are answering. Status/thinking updates may be unanchored.',
       'If I ask you something, reply here. If you work on something, post short progress updates here.',
       'Files are shared in this same session: watch for workspace.file.uploaded events, download with GET /v1/files/{file_id}, and upload any file type with POST /v1/files/base64 using your source openagents:<agent_name> and this channel_name.',
       'Use your stable agent_name as your delivery identity; display names are labels only.',
@@ -340,7 +356,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     if (!content || !currentChannel || sending || frozen) return;
     setSending(true);
     setDraft('');
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [] };
+    const replyTo = replyDraft;
+    setReplyDraft(null);
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
@@ -350,7 +368,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           type: 'workspace.message.posted',
           source: 'human:user',
           target: `channel/${currentChannel}`,
-          payload: { content, sender_type: 'human' },
+          payload: { content, sender_type: 'human', ...(replyTo ? { reply_to: replyTo } : {}) },
+          metadata: replyTo ? { reply_to: replyTo.id } : {},
           visibility: 'channel',
         }),
       });
@@ -363,6 +382,15 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   };
 
   const fileUrl = (fileId: string) => `${API_URL}/v1/files/${encodeURIComponent(fileId)}?token=${encodeURIComponent(token)}`;
+
+  const beginReply = (message: ChatMessage) => {
+    setReplyDraft({
+      id: message.id,
+      type: message.senderType,
+      sender: message.senderName,
+      text: message.content || message.attachments[0]?.filename || 'file',
+    });
+  };
 
   const uploadFiles = async (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
@@ -440,8 +468,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <main className="flex min-h-screen bg-slate-950 text-slate-100">
-      <aside className="hidden w-80 shrink-0 border-r border-white/10 bg-slate-950/90 p-4 lg:block">
+    <main className="fixed inset-0 flex overflow-hidden bg-slate-950 text-slate-100">
+      <aside className="hidden h-full w-80 shrink-0 overflow-hidden border-r border-white/10 bg-slate-950/90 p-4 lg:flex lg:flex-col">
         <div className="mb-5 flex items-center gap-3">
           <div className="flex size-10 items-center justify-center rounded-2xl bg-cyan-300 text-slate-950"><MessageCircle className="size-5" /></div>
           <div>
@@ -454,7 +482,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <Plus className="size-4" /> Add agent
         </button>
 
-        <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-white/10 bg-white/[0.04] p-3 pr-2">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-semibold">Agents</h2>
             <span className="text-xs text-slate-500">{room?.agents?.length || 0}</span>
@@ -483,8 +511,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-950/85 px-4 py-3 backdrop-blur">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-950/85 px-4 py-3 backdrop-blur">
           <div className="min-w-0">
             {editingRoom ? (
               <div className="flex gap-2">
@@ -508,10 +536,10 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           </div>
         </header>
 
-        {error && <div className="border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
-        {frozen && <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
+        {error && <div className="shrink-0 border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
+        {frozen && <div className="shrink-0 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
 
-        <div className="flex-1 overflow-y-auto px-4 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5">
           {loading && messages.length === 0 ? (
             <div className="flex h-full items-center justify-center text-slate-500"><Loader2 className="mr-2 size-5 animate-spin" /> Loading session…</div>
           ) : messages.length === 0 ? (
@@ -526,7 +554,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                 const agent = agentsByName.get(message.senderName);
                 const label = message.senderType === 'human' ? 'You' : agent ? agentLabel(agent) : message.senderName;
                 return (
-                  <div key={message.id} className="flex gap-3">
+                  <div key={message.id} id={`message-${message.id}`} className="group flex gap-3 scroll-mt-20">
                     <div className={message.senderType === 'human' ? 'flex size-9 shrink-0 items-center justify-center rounded-2xl bg-slate-700' : 'flex size-9 shrink-0 items-center justify-center rounded-2xl bg-cyan-300 text-slate-950'}>
                       {message.senderType === 'human' ? <User className="size-4" /> : <Bot className="size-4" />}
                     </div>
@@ -534,8 +562,16 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                       <div className="mb-1 flex items-center gap-2">
                         <span className="font-semibold text-white">{label}</span>
                         {agent && <span className="text-xs text-slate-500">id: {agent.agentName}</span>}
+                        {message.replyTo && <span className="rounded-full bg-cyan-300/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-100">reply</span>}
                         <span className="ml-auto text-xs text-slate-600">{timeText(message.timestamp)}</span>
+                        <button onClick={() => beginReply(message)} className="rounded-lg p-1 text-slate-500 opacity-0 transition hover:bg-white/10 hover:text-cyan-100 group-hover:opacity-100" title="Reply to this message"><Reply className="size-4" /></button>
                       </div>
+                      {message.replyTo && (
+                        <button onClick={() => document.getElementById(`message-${message.replyTo?.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="mb-3 block max-w-full rounded-xl border-l-2 border-cyan-300/70 bg-slate-950/70 px-3 py-2 text-left text-xs text-slate-400 hover:text-slate-200">
+                          <span className="block font-semibold text-cyan-100">Replying to {sourceName(message.replyTo.sender || message.replyTo.type || 'message')}</span>
+                          <span className="line-clamp-2 break-words">{message.replyTo.text || 'message'}</span>
+                        </button>
+                      )}
                       {message.content && <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">{message.content}</p>}
                       {message.attachments.length > 0 && (
                         <div className="mt-3 grid gap-2">
@@ -558,14 +594,26 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           )}
         </div>
 
-        <div className="border-t border-white/10 bg-slate-950 p-4">
-          <div className="mx-auto flex max-w-4xl gap-2">
+        <div className="shrink-0 border-t border-white/10 bg-slate-950 p-4">
+          <div className="mx-auto max-w-4xl">
+            {replyDraft && (
+              <div className="mb-2 flex items-center gap-3 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-sm text-cyan-50">
+                <Reply className="size-4 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-cyan-100">Replying to {sourceName(replyDraft.sender || replyDraft.type || 'message')}</div>
+                  <div className="truncate text-slate-200">{replyDraft.text || 'message'}</div>
+                </div>
+                <button onClick={() => setReplyDraft(null)} className="rounded-lg p-1 text-cyan-100 hover:bg-white/10"><X className="size-4" /></button>
+              </div>
+            )}
+            <div className="flex gap-2">
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => uploadFiles(e.currentTarget.files)} />
             <button onClick={() => fileInputRef.current?.click()} disabled={frozen || uploading || !currentChannel} className="rounded-2xl border border-white/10 px-4 text-slate-300 hover:border-cyan-300/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" title="Attach files">
               {uploading ? <Loader2 className="size-5 animate-spin" /> : <Paperclip className="size-5" />}
             </button>
             <textarea disabled={frozen || !currentChannel} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }} placeholder={frozen ? 'Chat is frozen' : 'Type a message…'} className="max-h-40 min-h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4 disabled:opacity-50" />
             <button onClick={sendMessage} disabled={frozen || sending || !draft.trim()} className="rounded-2xl bg-cyan-300 px-4 font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"><Send className="size-5" /></button>
+            </div>
           </div>
         </div>
       </section>
