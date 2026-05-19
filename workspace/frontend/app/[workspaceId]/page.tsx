@@ -148,6 +148,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
+  const [savingFreeze, setSavingFreeze] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -192,6 +193,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         lastHeartbeatAt: a.last_heartbeat_at || null,
       }));
       setRoom({ ...roomData, agents });
+      setFrozen(Boolean(roomData.settings?.frozen));
       if (!editingRoom && !savingRoomName) {
         setRoomNameDraft(roomData.name);
       }
@@ -220,11 +222,6 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     }
   }, [apiFetch, currentChannel, editingRoom, savingRoomName, token, workspaceId]);
 
-  useEffect(() => {
-    const key = `agentBridgeFreeze:${workspaceId}`;
-    setFrozen(window.localStorage.getItem(key) === 'true');
-  }, [workspaceId]);
-
   useEffect(() => { refresh(); }, [refresh]);
 
   useEffect(() => {
@@ -251,10 +248,29 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     } catch {}
   };
 
-  const toggleFreeze = () => {
+  const toggleFreeze = async () => {
+    if (!room || savingFreeze) return;
     const next = !frozen;
+    const previousFrozen = frozen;
+    const previousRoom = room;
+    const settings = { ...(room.settings || {}), frozen: next };
+    setSavingFreeze(true);
     setFrozen(next);
-    window.localStorage.setItem(`agentBridgeFreeze:${workspaceId}`, String(next));
+    setRoom({ ...room, settings });
+    try {
+      const updatedRoom = await apiFetch<Room>(`/v1/workspaces/${workspaceId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ settings }),
+      });
+      setRoom({ ...updatedRoom, agents: previousRoom.agents });
+      setFrozen(Boolean(updatedRoom.settings?.frozen));
+    } catch (err) {
+      setFrozen(previousFrozen);
+      setRoom(previousRoom);
+      setError(err instanceof Error ? err.message : 'Failed to update freeze state');
+    } finally {
+      setSavingFreeze(false);
+    }
   };
 
   const agentInviteText = useMemo(() => {
@@ -421,14 +437,14 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="flex items-center gap-2">
             <button onClick={() => setConnectOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 lg:hidden"><Plus className="size-4" /> Add agent</button>
             <button onClick={refresh} className="rounded-xl border border-white/10 p-2 text-slate-300 hover:border-cyan-300/40"><RefreshCw className={loading ? 'size-4 animate-spin' : 'size-4'} /></button>
-            <button onClick={toggleFreeze} className={frozen ? 'inline-flex items-center gap-2 rounded-xl bg-amber-300 px-3 py-2 text-sm font-semibold text-slate-950' : 'inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40'}>
-              <Snowflake className="size-4" /> {frozen ? 'Frozen' : 'Freeze'}
+            <button disabled={savingFreeze} onClick={toggleFreeze} className={frozen ? 'inline-flex items-center gap-2 rounded-xl bg-amber-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60' : 'inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 disabled:opacity-60'}>
+              <Snowflake className="size-4" /> {savingFreeze ? 'Saving…' : frozen ? 'Frozen' : 'Freeze'}
             </button>
           </div>
         </header>
 
         {error && <div className="border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
-        {frozen && <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Chat is frozen on this screen. New messages are paused and sending is disabled until you unfreeze.</div>}
+        {frozen && <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Room is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
 
         <div className="flex-1 overflow-y-auto px-4 py-5">
           {loading && messages.length === 0 ? (

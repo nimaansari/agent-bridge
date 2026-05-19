@@ -881,6 +881,13 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     content = payload.get("content", "")
     message_type = payload.get("message_type", "chat")
 
+    # Room-level freeze is a hard stop. When enabled, nobody — human or
+    # agent — can add chat/thinking/status messages to the room until the
+    # operator unfreezes it. This is intentionally enforced server-side so
+    # every connected agent stops, not just the current browser UI.
+    if (workspace.settings or {}).get("frozen"):
+        raise EventRejected("workspace_mod", "room_frozen: chat is frozen")
+
     # Reject posts from stale agent sessions. If the sender is an agent
     # and its claimed session_id does not match the current one in
     # WorkspaceMember, drop the event and flag it so the router can
