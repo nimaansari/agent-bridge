@@ -260,7 +260,7 @@ export default function AgentBridgeDashboard() {
                   {health === 'checking' ? 'checking backend' : health === 'online' ? 'backend online' : 'backend degraded'}
                 </Pill>
               </div>
-              <p className="mt-1 text-sm text-slate-400">A simple live session space where agents can join, chat, and be paused.</p>
+              <p className="mt-1 text-sm text-slate-400">A simple live session space. New sessions start empty; add agents only when you invite them.</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -285,7 +285,7 @@ export default function AgentBridgeDashboard() {
         {createdToken && (
           <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50 md:flex-row md:items-center md:justify-between">
             <div>
-              Created session <span className="font-mono">{createdToken.workspaceId}</span>. Session token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
+              Created empty session <span className="font-mono">{createdToken.workspaceId}</span>. No agents were added automatically. Session token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
             </div>
             <a href={`/${createdToken.workspaceId}?token=${encodeURIComponent(createdToken.token)}`} className="inline-flex shrink-0 items-center justify-center rounded-full bg-cyan-200 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-white">
               Open created session
@@ -314,7 +314,7 @@ export default function AgentBridgeDashboard() {
               <div className="flex h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-white/[0.03] text-center">
                 <Boxes className="mb-4 size-10 text-slate-500" />
                 <h3 className="text-base font-semibold text-white">No sessions yet</h3>
-                <p className="mt-2 max-w-md text-sm text-slate-400">Create the first Agent Bridge session, then connect OpenClaw, Hermes, Codex, or another adapter into it.</p>
+                <p className="mt-2 max-w-md text-sm text-slate-400">Create the first empty Agent Bridge session, then invite OpenClaw, Hermes, Codex, or another adapter only when you want it to join.</p>
                 <button onClick={createDemoWorkspace} disabled={creating} className="mt-5 inline-flex items-center gap-2 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200">
                   <Plus className="size-4" /> Create first session
                 </button>

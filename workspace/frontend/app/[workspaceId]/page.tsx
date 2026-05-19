@@ -533,6 +533,30 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  const renderAgentCard = (agent: Agent) => (
+    <div key={agent.agentName} className="rounded-xl bg-slate-900/80 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          {editingAgent === agent.agentName ? (
+            <input autoFocus className="w-full rounded-lg bg-slate-800 px-2 py-1 text-sm outline-none ring-1 ring-cyan-300" value={agentNameDraft} onChange={(e) => setAgentNameDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveAgentName(agent); if (e.key === 'Escape') setEditingAgent(null); }} />
+          ) : (
+            <p className="truncate text-sm font-semibold">{agentLabel(agent)}</p>
+          )}
+          <p className="truncate text-xs text-slate-500">id: {agent.agentName}</p>
+          <p className="mt-1 text-xs text-slate-400">{agent.agentType || 'agent'} · {agent.status}</p>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-slate-300 hover:border-cyan-300/40 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">
+          <Edit3 className="size-3.5" /> Rename
+        </button>
+        <button disabled={removingAgent === agent.agentName} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-300/20 px-2 py-1.5 text-xs text-rose-100 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => removeAgent(agent)} title="Remove agent from session">
+          {removingAgent === agent.agentName ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />} Remove
+        </button>
+      </div>
+    </div>
+  );
+
   if (!token) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 text-white">
@@ -568,29 +592,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
             <span className="text-xs text-slate-500">{room?.agents?.length || 0}</span>
           </div>
           <div className="space-y-2">
-            {(room?.agents || []).map((agent) => (
-              <div key={agent.agentName} className="rounded-xl bg-slate-900/80 p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    {editingAgent === agent.agentName ? (
-                      <input autoFocus className="w-full rounded-lg bg-slate-800 px-2 py-1 text-sm outline-none ring-1 ring-cyan-300" value={agentNameDraft} onChange={(e) => setAgentNameDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveAgentName(agent); if (e.key === 'Escape') setEditingAgent(null); }} />
-                    ) : (
-                      <p className="truncate text-sm font-semibold">{agentLabel(agent)}</p>
-                    )}
-                    <p className="truncate text-xs text-slate-500">id: {agent.agentName}</p>
-                    <p className="mt-1 text-xs text-slate-400">{agent.agentType || 'agent'} · {agent.status}</p>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
-                    <button className="rounded-lg p-1 text-slate-500 hover:bg-white/10 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">
-                      <Edit3 className="size-3.5" />
-                    </button>
-                    <button disabled={removingAgent === agent.agentName} className="rounded-lg p-1 text-slate-500 hover:bg-rose-500/10 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => removeAgent(agent)} title="Remove agent from session">
-                      {removingAgent === agent.agentName ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
+            {(room?.agents || []).map(renderAgentCard)}
             {!room?.agents?.length && <p className="text-sm text-slate-500">No agents connected yet.</p>}
           </div>
         </div>
@@ -623,6 +625,16 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
         {error && <div className="shrink-0 border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
         {frozen && <div className="shrink-0 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
+
+        <div className="shrink-0 border-b border-white/10 bg-slate-950/90 px-4 py-3 lg:hidden">
+          <details className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <summary className="cursor-pointer text-sm font-semibold text-slate-100">Manage agents ({room?.agents?.length || 0})</summary>
+            <div className="mt-3 grid gap-2">
+              {(room?.agents || []).map(renderAgentCard)}
+              {!room?.agents?.length && <p className="text-sm text-slate-500">No agents connected. New sessions start empty — use Add agent when you want one to join.</p>}
+            </div>
+          </details>
+        </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5">
           {loading && messages.length === 0 ? (
