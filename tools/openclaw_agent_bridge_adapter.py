@@ -185,7 +185,8 @@ def main() -> int:
 
     state = load_state(args.state)
     processed = set(state.get("processed_event_ids") or [])
-    session_id = state.get("openclaw_session_id") or f"agent-bridge:{args.network}:{args.channel}:{args.agent_name}"
+    default_session_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"agent-bridge-{args.network}-{args.channel}-{args.agent_name}")
+    session_id = state.get("openclaw_session_id") or default_session_id
     state["openclaw_session_id"] = session_id
 
     while True:
