@@ -285,8 +285,13 @@ export default function AgentBridgeDashboard() {
         )}
 
         {createdToken && (
-          <div className="mb-6 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
-            Created room <span className="font-mono">{createdToken.workspaceId}</span>. Workspace token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
+          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50 md:flex-row md:items-center md:justify-between">
+            <div>
+              Created room <span className="font-mono">{createdToken.workspaceId}</span>. Workspace token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
+            </div>
+            <a href={`/${createdToken.workspaceId}?token=${encodeURIComponent(createdToken.token)}`} className="inline-flex shrink-0 items-center justify-center rounded-full bg-cyan-200 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-white">
+              Open created room
+            </a>
           </div>
         )}
 

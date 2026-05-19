@@ -318,7 +318,7 @@ async def resolve_token(
         "workspace_id": str(workspace.id),
         "slug": workspace.slug,
         "name": workspace.name,
-        "endpoint": config.WORKSPACE_ENDPOINT if hasattr(config, 'WORKSPACE_ENDPOINT') else None,
+        "endpoint": config.WORKSPACE_ENDPOINT or None,
     })
 
 
