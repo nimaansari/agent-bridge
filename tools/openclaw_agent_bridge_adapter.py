@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Agent Bridge ↔ OpenClaw session adapter.
 
-This is intentionally a transport adapter, not a responder. Inbound Agent Bridge
-messages are handed to OpenClaw as a real session turn using a stable session id;
-OpenClaw's generated reply is then posted back to Agent Bridge with reply anchors
-and terminal acks.
+Transport adapter, not a chatbot script. Each configured Agent Bridge identity is
+mapped to its own OpenClaw session id. Inbound events targeted to that identity
+are passed to OpenClaw; the OpenClaw reply is posted back with reply anchors and
+terminal acks.
+
+This is generic across local OpenClaw-backed agents: add more --agent entries or
+a JSON --config. Agent Bridge itself stays agent-agnostic; every agent connects
+through the same session-adapter contract.
 """
 from __future__ import annotations
 
@@ -15,14 +19,27 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 TERMINAL_ACKS = {"replied", "failed"}
 DEFAULT_STATE = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_adapter_state.json"
+DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_agents.json"
+
+
+@dataclass(frozen=True)
+class AgentBinding:
+    agent_name: str
+    openclaw_agent: str | None = None
+    model: str | None = None
+    thinking: str | None = None
+
+
+def slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "agent"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -50,13 +67,7 @@ def http_json(method: str, url: str, token: str, data: dict[str, Any] | None = N
 
 
 def poll_events(base: str, network: str, channel: str, token: str, limit: int = 100) -> list[dict[str, Any]]:
-    qs = urllib.parse.urlencode({
-        "network": network,
-        "channel": channel,
-        "type": "workspace",
-        "sort": "desc",
-        "limit": str(limit),
-    })
+    qs = urllib.parse.urlencode({"network": network, "channel": channel, "type": "workspace", "sort": "desc", "limit": str(limit)})
     data = http_json("GET", f"{base}/v1/events?{qs}", token)
     return list(reversed(data["data"]["events"]))
 
@@ -88,12 +99,17 @@ def post_reply(base: str, network: str, channel: str, token: str, agent_name: st
 
 
 def source_agent(source: str) -> str | None:
-    if source.startswith("openagents:"):
-        return source.split(":", 1)[1]
-    return None
+    return source.split(":", 1)[1] if source.startswith("openagents:") else None
 
 
-def should_handle(event: dict[str, Any], agent_name: str) -> bool:
+def terminal_for_agent(event: dict[str, Any], agent_name: str) -> bool:
+    responses = (event.get("metadata") or {}).get("handoff_responses") or {}
+    status = (responses.get(agent_name) or {}).get("status")
+    return status in TERMINAL_ACKS
+
+
+def should_handle(event: dict[str, Any], binding: AgentBinding) -> bool:
+    agent_name = binding.agent_name
     if event.get("type") != "workspace.message.posted":
         return False
     payload = event.get("payload") or {}
@@ -105,13 +121,11 @@ def should_handle(event: dict[str, Any], agent_name: str) -> bool:
     targets = metadata.get("target_agents")
     required = metadata.get("required_responses") or []
     if agent_name in required:
-        responses = metadata.get("handoff_responses") or {}
-        status = (responses.get(agent_name) or {}).get("status")
-        return status not in TERMINAL_ACKS
+        return not terminal_for_agent(event, agent_name)
     if isinstance(targets, list):
         return agent_name in targets
-    # Human/channel messages are valid session input; agent-to-agent messages
-    # without explicit targeting are not, to avoid accidental loops.
+    # Human messages can enter every configured local agent session. Agent
+    # messages must be explicitly targeted/required to prevent loops.
     return not str(event.get("source") or "").startswith("openagents:")
 
 
@@ -123,7 +137,6 @@ def clean_reply(raw: str) -> str:
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
-        # Some OpenClaw JSON uses nested result fields.
         result = obj.get("result") or obj.get("data")
         if isinstance(result, dict):
             for key in ("reply", "text", "message", "content"):
@@ -132,13 +145,25 @@ def clean_reply(raw: str) -> str:
                     return val.strip()
     except Exception:
         pass
-    # Strip obvious JSON/log wrappers only as a fallback.
     return raw[-6000:] if len(raw) > 6000 else raw
 
 
-def run_openclaw_turn(session_id: str, prompt: str, timeout: int) -> str:
+def session_id_for(state: dict[str, Any], network: str, channel: str, agent_name: str) -> str:
+    sessions = state.setdefault("openclaw_sessions", {})
+    if agent_name not in sessions:
+        sessions[agent_name] = slug(f"agent-bridge-{network}-{channel}-{agent_name}")
+    return sessions[agent_name]
+
+
+def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
     openclaw_bin = os.environ.get("OPENCLAW_BIN", "/home/nimapro1381/.npm-global/bin/openclaw")
     cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
+    if binding.openclaw_agent:
+        cmd.extend(["--agent", binding.openclaw_agent])
+    if binding.model:
+        cmd.extend(["--model", binding.model])
+    if binding.thinking:
+        cmd.extend(["--thinking", binding.thinking])
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or f"openclaw exited {proc.returncode}").strip())
@@ -148,22 +173,55 @@ def run_openclaw_turn(session_id: str, prompt: str, timeout: int) -> str:
     return reply
 
 
-def build_prompt(event: dict[str, Any], agent_name: str) -> str:
+def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
     payload = event.get("payload") or {}
     metadata = event.get("metadata") or {}
     sender = payload.get("sender_name") or source_agent(event.get("source") or "") or event.get("source") or "unknown"
     content = payload.get("content") or ""
-    required = agent_name in (metadata.get("required_responses") or [])
+    required = binding.agent_name in (metadata.get("required_responses") or [])
     return (
-        "You are mr.robot participating in an Agent Bridge session. "
-        "This is a real OpenClaw session turn for the Agent Bridge transport. "
-        "Reply with useful work or a concrete blocker. Do not repeat protocol summaries. "
-        "If addressed by another agent, coordinate with implementation-level detail.\n\n"
+        f"You are {binding.agent_name}, a joined agent in an Agent Bridge session. "
+        "This is a real OpenClaw session turn delivered by the Agent Bridge transport adapter. "
+        "Respond as an agent teammate with concrete work, code-level feedback, or a clear blocker. "
+        "Do not produce generic agreement or repeated protocol summaries.\n\n"
         f"Agent Bridge event id: {event.get('id')}\n"
         f"Sender: {sender}\n"
         f"Response required: {required}\n"
         f"Message:\n{content}\n"
     )
+
+
+def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
+    raw: list[dict[str, Any]] = []
+    config = args.config
+    if config and config.exists():
+        data = json.loads(config.read_text())
+        raw.extend(data.get("agents", []))
+    for name in args.agent_name or []:
+        raw.append({"agent_name": name})
+    if not raw:
+        raw.append({"agent_name": "mr.robot"})
+    seen: set[str] = set()
+    bindings: list[AgentBinding] = []
+    for item in raw:
+        name = item.get("agent_name") or item.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        bindings.append(AgentBinding(agent_name=name, openclaw_agent=item.get("openclaw_agent"), model=item.get("model"), thinking=item.get("thinking")))
+    return bindings
+
+
+def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: AgentBinding, event: dict[str, Any]) -> None:
+    event_id = event["id"]
+    session_id = session_id_for(state, args.network, args.channel, binding.agent_name)
+    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
+    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
+    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
+    reply = run_openclaw_turn(binding, session_id, build_prompt(event, binding), args.timeout)
+    reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
+    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", f"reply_event_id={reply_event['id']}")
+    print(json.dumps({"agent": binding.agent_name, "handled": event_id, "reply_event_id": reply_event["id"]}), flush=True)
 
 
 def main() -> int:
@@ -172,7 +230,8 @@ def main() -> int:
     ap.add_argument("--network", required=True)
     ap.add_argument("--channel", required=True)
     ap.add_argument("--token", default=os.environ.get("AGENT_BRIDGE_TOKEN"))
-    ap.add_argument("--agent-name", default="mr.robot")
+    ap.add_argument("--agent-name", action="append", help="Agent Bridge identity to bind. Repeatable.")
+    ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="JSON config: {agents:[{agent_name, openclaw_agent?, model?, thinking?}]}")
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
     ap.add_argument("--poll-seconds", type=float, default=5.0)
     ap.add_argument("--run-once", action="store_true")
@@ -182,40 +241,40 @@ def main() -> int:
     if not args.token:
         print("AGENT_BRIDGE_TOKEN/--token is required", file=sys.stderr)
         return 2
-
+    bindings = load_bindings(args)
     state = load_state(args.state)
-    processed = set(state.get("processed_event_ids") or [])
-    default_session_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"agent-bridge-{args.network}-{args.channel}-{args.agent_name}")
-    session_id = state.get("openclaw_session_id") or default_session_id
-    state["openclaw_session_id"] = session_id
+    processed_by_agent: dict[str, set[str]] = {
+        b.agent_name: set((state.get("processed_event_ids_by_agent") or {}).get(b.agent_name, [])) for b in bindings
+    }
 
     while True:
         events = poll_events(args.base, args.network, args.channel, args.token)
         if args.baseline_only:
-            processed.update(e["id"] for e in events)
-            state["processed_event_ids"] = sorted(processed)
+            by_agent = state.setdefault("processed_event_ids_by_agent", {})
+            for binding in bindings:
+                ids = sorted(set(by_agent.get(binding.agent_name, [])) | {e["id"] for e in events})
+                by_agent[binding.agent_name] = ids[-1000:]
             save_state(args.state, state)
-            print(f"baselined {len(events)} events")
+            print(f"baselined {len(events)} events for {', '.join(b.agent_name for b in bindings)}")
             return 0
 
         for event in events:
-            event_id = event["id"]
-            if event_id in processed or not should_handle(event, args.agent_name):
-                continue
-            processed.add(event_id)
-            state["processed_event_ids"] = sorted(processed)[-1000:]
-            save_state(args.state, state)
-            try:
-                post_ack(args.base, args.network, args.token, event_id, args.agent_name, "delivered")
-                post_ack(args.base, args.network, args.token, event_id, args.agent_name, "seen")
-                post_ack(args.base, args.network, args.token, event_id, args.agent_name, "processing")
-                reply = run_openclaw_turn(session_id, build_prompt(event, args.agent_name), args.timeout)
-                reply_event = post_reply(args.base, args.network, args.channel, args.token, args.agent_name, reply, event_id)
-                post_ack(args.base, args.network, args.token, event_id, args.agent_name, "replied", f"reply_event_id={reply_event['id']}")
-                print(json.dumps({"handled": event_id, "reply_event_id": reply_event["id"]}))
-            except Exception as exc:
-                post_ack(args.base, args.network, args.token, event_id, args.agent_name, "failed", str(exc))
-                print(json.dumps({"failed": event_id, "error": str(exc)}), file=sys.stderr)
+            for binding in bindings:
+                event_id = event["id"]
+                processed = processed_by_agent.setdefault(binding.agent_name, set())
+                if event_id in processed or not should_handle(event, binding):
+                    continue
+                processed.add(event_id)
+                state.setdefault("processed_event_ids_by_agent", {})[binding.agent_name] = sorted(processed)[-1000:]
+                save_state(args.state, state)
+                try:
+                    handle_event(args, state, binding, event)
+                    save_state(args.state, state)
+                except Exception as exc:
+                    try:
+                        post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "failed", str(exc))
+                    finally:
+                        print(json.dumps({"agent": binding.agent_name, "failed": event_id, "error": str(exc)}), file=sys.stderr, flush=True)
         if args.run_once:
             return 0
         time.sleep(args.poll_seconds)

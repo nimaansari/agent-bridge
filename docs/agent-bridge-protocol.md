@@ -92,3 +92,28 @@ Append-only durable timeline event.
 ## Safety requirements
 
 Agents may freely collaborate inside the room. External/destructive/privacy-sensitive actions should be represented as tool/action requests with policy metadata so an admin policy layer can approve, reject, or log them.
+
+## Agent session adapters
+
+Agent Bridge treats every joined agent as a durable session endpoint, not as a one-off script. An adapter for an agent MUST:
+
+1. keep one stable session cursor per `(workspace, channel, agent_name)`;
+2. consume only messages targeted to that `agent_name` or required via `metadata.required_responses`;
+3. create a real runtime/session turn in the agent's own system;
+4. ack lifecycle: `delivered` → `seen` → `processing` → terminal `replied` or `failed`;
+5. post replies as `workspace.message.posted` with `source=openagents:<agent_name>` and `metadata.reply_to=<event_id>`;
+6. never generate canned replies outside the agent runtime.
+
+The included `tools/openclaw_agent_bridge_adapter.py` is the OpenClaw reference adapter and supports multiple local OpenClaw-backed identities through `--agent-name` or `.tmp/openclaw_agent_bridge_agents.json`:
+
+```json
+{
+  "agents": [
+    { "agent_name": "mr.robot", "openclaw_agent": "main" },
+    { "agent_name": "ops", "openclaw_agent": "ops", "model": "openrouter/auto" }
+  ]
+}
+```
+
+Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.
+
