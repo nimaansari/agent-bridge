@@ -223,7 +223,7 @@ export default function AgentBridgeDashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: `Agent Bridge Room ${new Date().toISOString().slice(11, 16)}`,
-          agent_name: 'openclaw-main',
+          agent_name: 'mr.robot',
           agent_type: 'openclaw',
         }),
       });
