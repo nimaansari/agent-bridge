@@ -714,3 +714,79 @@ class TestHandoffAttempts:
         assert handoffs.status_code == 200
         data = handoffs.json()["data"]
         assert data["attempts"][0]["status"] == "stalled"
+
+
+class TestAgentInbox:
+    """Per-agent actionable inbox."""
+
+    def test_agent_inbox_filters_mixed_room_transcript(self, client, workspace):
+        channel_name = workspace["channel"]["name"]
+        # Noise: unrelated human message, ack, self-message, other-agent target.
+        client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "general chat"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "self note"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "other target"},
+            "metadata": {"target_agents": ["reviewer"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        actionable = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha do this"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert actionable.status_code == 200
+        event_id = actionable.json()["data"]["id"]
+
+        inbox = client.get(
+            "/v1/agents/agent-alpha/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert inbox.status_code == 200
+        events = inbox.json()["data"]["events"]
+        assert [event["id"] for event in events] == [event_id]
+
+    def test_agent_inbox_excludes_terminal_handoff(self, client, workspace):
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha do this"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        event_id = resp.json()["data"]["id"]
+        client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "replied",
+            "attempt_id": "attempt-1",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        inbox = client.get(
+            "/v1/agents/agent-alpha/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert inbox.status_code == 200
+        assert inbox.json()["data"]["events"] == []

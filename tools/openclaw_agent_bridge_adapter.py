@@ -87,6 +87,15 @@ def poll_events(base: str, network: str, channel: str, token: str, after: str | 
     return data["data"]
 
 
+def poll_agent_inbox(base: str, network: str, channel: str, token: str, agent_name: str, after: str | None = None, limit: int = 50) -> dict[str, Any]:
+    params = {"network": network, "channel": channel, "limit": str(limit)}
+    if after:
+        params["after"] = after
+    qs = urllib.parse.urlencode(params)
+    data = http_json("GET", f"{base}/v1/agents/{urllib.parse.quote(agent_name)}/inbox?{qs}", token)
+    return data["data"]
+
+
 def discover_channel_agents(base: str, network: str, channel: str, token: str) -> list[str]:
     qs = urllib.parse.urlencode({"network": network})
     data = http_json("GET", f"{base}/v1/discover?{qs}", token)
@@ -276,6 +285,10 @@ def clamp_text(value: str, max_chars: int) -> str:
 
 def cursor_key(network: str, channel: str) -> str:
     return f"{network}:{channel}"
+
+
+def inbox_cursor_key(network: str, channel: str, agent_name: str) -> str:
+    return f"{network}:{channel}:{agent_name}:inbox"
 
 
 def is_session_channel(channel: str) -> bool:
@@ -590,6 +603,7 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--retry-backoff-seconds", type=float, default=30.0, help="Base backoff for retryable handoff failures.")
     ap.add_argument("--max-transient-attempts", type=int, default=3, help="Stop retrying and mark processed after this many failed attempts.")
+    ap.add_argument("--raw-room-poll", action="store_true", help="Legacy mode: poll the raw room transcript instead of the per-agent inbox.")
     args = ap.parse_args()
     if not args.token:
         print("AGENT_BRIDGE_TOKEN/--token is required", file=sys.stderr)
@@ -603,9 +617,23 @@ def main() -> int:
         bindings = load_bindings(args)
         migrate_legacy_state(state, bindings)
         maybe_heartbeat(args, state, bindings)
-        data = poll_events(args.base, args.network, args.channel, args.token, cursor)
-        polled_events = data.get("events", [])
         retry_events = due_retry_events(state, bindings)
+        if args.raw_room_poll:
+            data = poll_events(args.base, args.network, args.channel, args.token, cursor)
+            polled_events = data.get("events", [])
+        else:
+            data = {"events": [], "newest_id": None}
+            polled_events = []
+            for binding in bindings:
+                inbox_key = inbox_cursor_key(args.network, args.channel, binding.agent_name)
+                inbox_cursor = state.get("cursors", {}).get(inbox_key)
+                inbox = poll_agent_inbox(args.base, args.network, args.channel, args.token, binding.agent_name, inbox_cursor)
+                state.setdefault("cursors", {})[inbox_key] = inbox.get("newest_id") or inbox_cursor
+                for event in inbox.get("events", []):
+                    event = dict(event)
+                    event["__inbox_agent"] = binding.agent_name
+                    polled_events.append(event)
+            save_state(args.state, state)
         events = retry_events + [e for e in polled_events if e.get("id") not in {r.get("id") for r in retry_events}]
         if args.baseline_only:
             by_agent = state.setdefault("processed_event_ids_by_agent", {})
@@ -619,7 +647,7 @@ def main() -> int:
             print(f"baselined {len(events)} events for {', '.join(b.agent_name for b in bindings)}")
             return 0
 
-        if not cursor and polled_events and should_attach_at_head(args.channel, args.replay_existing):
+        if args.raw_room_poll and not cursor and polled_events and should_attach_at_head(args.channel, args.replay_existing):
             # First production start should attach at the current session head
             # rather than replaying old room history. Operators can opt into
             # replay with --replay-existing for repair/backfill jobs.
@@ -642,6 +670,9 @@ def main() -> int:
                 state.setdefault("cursors", {})[cursor_key(args.network, args.channel)] = cursor
             for binding in bindings:
                 event_id = event["id"]
+                inbox_agent = event.get("__inbox_agent")
+                if inbox_agent and inbox_agent != binding.agent_name:
+                    continue
                 if event_id in processed_set(state, binding.agent_name) or not should_handle(event, binding):
                     continue
                 if not should_retry_now(state, binding.agent_name, event_id):

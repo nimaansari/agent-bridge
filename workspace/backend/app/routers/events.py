@@ -104,6 +104,53 @@ def _reply_message_id_from_detail(detail: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _event_dict(row: EventRecord) -> dict:
+    return {
+        "id": row.id,
+        "type": row.type,
+        "source": row.source,
+        "target": row.target,
+        "payload": row.payload,
+        "metadata": row.metadata_,
+        "timestamp": row.timestamp,
+        "visibility": row.visibility,
+    }
+
+
+def _source_agent(source: str) -> Optional[str]:
+    return source.split(":", 1)[1] if source.startswith("openagents:") else None
+
+
+def _terminal_for_agent(row: EventRecord, agent_name: str) -> bool:
+    responses = (row.metadata_ or {}).get("handoff_responses") or {}
+    status = (responses.get(agent_name) or {}).get("status")
+    return status in {"replied", "failed"}
+
+
+def _is_actionable_for_agent(row: EventRecord, agent_name: str) -> bool:
+    """Server-side actionable inbox predicate for runtime adapters.
+
+    Transcript events are intentionally noisy: chat, acks, statuses, files,
+    replies, human/admin notes. Runtime adapters should consume this inbox
+    predicate instead of inferring obligations from the raw room feed.
+    """
+    if row.type != "workspace.message.posted":
+        return False
+    if _source_agent(row.source or "") == agent_name:
+        return False
+    payload = row.payload or {}
+    if payload.get("message_type") in {"thinking", "status", "tool", "tool_call", "tool_result", "todos"}:
+        return False
+    metadata = row.metadata_ or {}
+    required = metadata.get("required_responses") or []
+    if agent_name in required:
+        return not _terminal_for_agent(row, agent_name)
+    targets = metadata.get("target_agents") or []
+    if agent_name in targets:
+        return not _terminal_for_agent(row, agent_name)
+    return False
+
+
 def _mark_expired_processing_attempts_stalled(db: Session, workspace_id: str, message_id: str) -> None:
     now = _utcnow()
     attempts = db.execute(
@@ -816,16 +863,7 @@ async def poll_events(
 
     response = success_response({
         "events": [
-            {
-                "id": e.id,
-                "type": e.type,
-                "source": e.source,
-                "target": e.target,
-                "payload": e.payload,
-                "metadata": e.metadata_,
-                "timestamp": e.timestamp,
-                "visibility": e.visibility,
-            }
+            _event_dict(e)
             for e in events
         ],
         "has_more": has_more,
@@ -879,6 +917,77 @@ async def poll_events(
             pass
 
     return response
+
+
+@router.get("/agents/{agent_name}/inbox")
+async def poll_agent_inbox(
+    agent_name: str,
+    network: str = Query(..., description="Network (workspace) ID or slug"),
+    channel: Optional[str] = Query(None, description="Restrict to one session/channel name"),
+    after: Optional[str] = Query(None, description="Return actionable events after this event ID"),
+    limit: int = Query(50, ge=1, le=100, description="Max actionable events to return"),
+    db: Session = Depends(get_db),
+    x_workspace_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Return only actionable messages for one agent.
+
+    This endpoint is the production transport surface for runtime adapters.
+    It separates the human-visible transcript from the per-agent work queue so
+    agents do not mix up chat, acks, status noise, self-messages, or messages
+    intended for other agents.
+    """
+    workspace = db.execute(
+        select(Workspace).where(_workspace_filter(network))
+    ).scalar_one_or_none()
+    if not workspace:
+        return json_response(ResponseCode.NOT_FOUND, "Network not found")
+    if not _verify_workspace_access(workspace, x_workspace_token, authorization):
+        return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    query = select(EventRecord).where(
+        EventRecord.network_id == workspace.id,
+        EventRecord.type == "workspace.message.posted",
+    )
+    if channel:
+        query = query.where(EventRecord.target == f"channel/{channel}")
+
+    if after:
+        cursor_row = db.execute(
+            select(EventRecord.timestamp, EventRecord.id).where(
+                EventRecord.network_id == workspace.id,
+                EventRecord.id == after,
+            )
+        ).one_or_none()
+        if cursor_row is not None:
+            query = query.where(
+                or_(
+                    EventRecord.timestamp > cursor_row.timestamp,
+                    and_(EventRecord.timestamp == cursor_row.timestamp, EventRecord.id > cursor_row.id),
+                )
+            )
+
+    # Pull a bounded candidate window and filter in Python for SQLite/Postgres
+    # portability across JSON metadata shapes. The candidate window is larger
+    # than the returned limit so the inbox remains useful even when the room is
+    # busy with unrelated chat.
+    candidates = db.execute(
+        query.order_by(EventRecord.timestamp.asc(), EventRecord.id.asc()).limit(max(limit * 10, 200))
+    ).scalars().all()
+    all_actionable = [row for row in candidates if _is_actionable_for_agent(row, agent_name)]
+    actionable = all_actionable[:limit]
+    newest_id = (actionable[-1].id if len(all_actionable) > limit else (candidates[-1].id if candidates else after))
+    return success_response({
+        "workspace_id": str(workspace.id),
+        "channel": channel,
+        "agent_name": agent_name,
+        "events": [_event_dict(row) for row in actionable],
+        "has_more": len(all_actionable) > limit,
+        # Cursor advances over the inspected candidate window, not just
+        # returned actionable events. That prevents adapters from rescanning
+        # the same unrelated room chatter forever.
+        "newest_id": newest_id,
+    })
 
 
 # ---------------------------------------------------------------------------

@@ -105,6 +105,8 @@ Agent Bridge treats every joined agent as a durable session endpoint, not as a o
 6. keep intermediate runtime chatter (`thinking`, `status`, tool calls/results) out of the durable visible transcript;
 7. never generate canned replies outside the agent runtime.
 
+Runtime adapters SHOULD consume `GET /v1/agents/{agent_name}/inbox?network=...&channel=...` instead of polling the raw transcript. The inbox endpoint returns only actionable messages for that agent: targeted or required messages, excluding self-messages, acks, status/tool chatter, unrelated participant chat, and handoffs already terminal for that agent. The human transcript remains shared, but the agent transport is a per-agent work queue.
+
 The included `tools/openclaw_agent_bridge_adapter.py` is the reference local runtime adapter. It supports OpenClaw directly and any other runtime (Hermes, custom CLIs, sidecars) through an explicit command template. Configure multiple identities through `--agent-name` or a private JSON config copied from `tools/agent_bridge_adapter_config.example.json`:
 
 ```json
