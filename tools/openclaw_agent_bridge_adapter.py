@@ -34,7 +34,7 @@ DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tm
 @dataclass(frozen=True)
 class AgentBinding:
     agent_name: str
-    runtime: str = "openclaw"
+    runtime: str = "openclaw_model"
     openclaw_agent: str | None = None
     model: str | None = None
     thinking: str | None = None
@@ -194,6 +194,16 @@ def clean_reply(raw: str) -> str:
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
+        outputs = obj.get("outputs")
+        if isinstance(outputs, list):
+            texts = []
+            for item in outputs:
+                if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                    texts.append(item["text"].strip())
+                elif isinstance(item, str) and item.strip():
+                    texts.append(item.strip())
+            if texts:
+                return "\n\n".join(texts).strip()
         result = obj.get("result") or obj.get("data")
         if isinstance(result, dict):
             payloads = result.get("payloads")
@@ -225,6 +235,8 @@ def room_session_key(network: str, channel: str, binding: AgentBinding) -> str:
 
 def session_id_for(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
     runtime = binding.runtime or "openclaw"
+    if is_sessionless_runtime(runtime):
+        return "one-shot"
     sessions = state.setdefault("runtime_sessions", {})
     runtime_sessions = sessions.setdefault(runtime, {})
     key = room_session_key(network, channel, binding)
@@ -241,6 +253,8 @@ def session_id_for(state: dict[str, Any], network: str, channel: str, binding: A
 
 def rotate_session_id(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
     runtime = binding.runtime or "openclaw"
+    if is_sessionless_runtime(runtime):
+        return "one-shot"
     key = room_session_key(network, channel, binding)
     prefix = binding.session_prefix or f"agent-bridge-{runtime}"
     new_id = slug(f"{prefix}-{network}-{channel}-{binding.agent_name}-{int(time.time())}")
@@ -352,8 +366,32 @@ def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeo
     return run_command(cmd, timeout, binding.env)
 
 
+def is_sessionless_runtime(runtime: str | None) -> bool:
+    return (runtime or "").lower() in {"openclaw_model", "openclaw-model", "model", "infer", "capability_model"}
+
+
+def run_openclaw_model_turn(binding: AgentBinding, prompt: str, timeout: int) -> str:
+    """Run a one-shot OpenClaw model capability turn without creating a session.
+
+    `openclaw agent --session-id ...` is useful for normal chat channels, but
+    Agent Bridge should not pollute the user's visible OpenClaw/ClawDeck session
+    list with adapter implementation details. The model capability transport is
+    intentionally stateless and leaves durable conversation history in Agent
+    Bridge, where it belongs.
+    """
+    openclaw_bin = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
+    if not openclaw_bin:
+        raise RuntimeError("openclaw binary not found; set OPENCLAW_BIN or put openclaw on PATH")
+    cmd = [openclaw_bin, "capability", "model", "run", "--gateway", "--prompt", prompt, "--json"]
+    if binding.model:
+        cmd.extend(["--model", binding.model])
+    return run_command(cmd, timeout, binding.env)
+
+
 def run_configured_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
     runtime = (binding.runtime or "openclaw").lower()
+    if is_sessionless_runtime(runtime):
+        return run_openclaw_model_turn(binding, prompt, timeout)
     if runtime == "openclaw":
         return run_openclaw_turn(binding, session_id, prompt, timeout)
     if binding.command:
@@ -397,6 +435,8 @@ def runtime_session_description(binding: AgentBinding) -> str:
     real session turn, without implying Agent Bridge only supports OpenClaw.
     """
     runtime = (binding.runtime or "openclaw").lower()
+    if is_sessionless_runtime(runtime):
+        return "a one-shot OpenClaw model turn with no visible OpenClaw session"
     if runtime == "openclaw":
         return "a real OpenClaw session turn"
     return f"a real {binding.runtime} runtime session turn"
@@ -459,7 +499,7 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
             command = [command]
         bindings.append(AgentBinding(
             agent_name=name,
-            runtime=merged.get("runtime") or merged.get("driver") or "openclaw",
+            runtime=merged.get("runtime") or merged.get("driver") or "openclaw_model",
             openclaw_agent=merged.get("openclaw_agent"),
             model=merged.get("model"),
             thinking=merged.get("thinking"),

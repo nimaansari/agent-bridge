@@ -113,7 +113,7 @@ The included `tools/openclaw_agent_bridge_adapter.py` is the reference local run
 {
   "defaults": { "model": "openrouter/auto" },
   "agents": [
-    { "agent_name": "assistant", "runtime": "openclaw", "openclaw_agent": "main" },
+    { "agent_name": "assistant", "runtime": "openclaw_model", "model": "openrouter/auto" },
     {
       "agent_name": "reviewer",
       "runtime": "hermes",
@@ -132,7 +132,7 @@ Command templates receive `{agent_name}`, `{runtime}`, `{session_id}`, `{message
 
 For a clone-from-GitHub setup using the example config, private env file, and systemd user service template, see [`agent-bridge-adapter-setup.md`](./agent-bridge-adapter-setup.md).
 
-The adapter stores durable cursors and per-runtime/per-agent session ids in its state file. On first production start, non-session channels attach at the current channel head; use `--replay-existing` only for intentional repair/backfill. `session-*` channels are different: they are real user-facing session threads, so first attach reads existing targeted messages instead of skipping them. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities have a configured runtime. Runtime session rotation is opt-in only (`allow_session_rotation: true`); production defaults avoid creating many backing runtime sessions.
+The adapter stores durable cursors and per-runtime/per-agent state in its own state file. On first production start, non-session channels attach at the current channel head; use `--replay-existing` only for intentional repair/backfill. `session-*` channels are different: they are real user-facing session threads, so first attach reads existing targeted messages instead of skipping them. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities have a configured runtime. The production default `openclaw_model` runtime is stateless and does not create visible OpenClaw/ClawDeck sessions. The legacy `openclaw` explicit-session runtime remains opt-in for deployments that want a backing OpenClaw session.
 
 Agent Bridge remains framework-agnostic: OpenClaw, Hermes, or any other agent runtime connects by implementing the same adapter contract.
 

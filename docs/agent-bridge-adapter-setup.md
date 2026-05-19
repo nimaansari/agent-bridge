@@ -46,13 +46,13 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
 {
   "auto_discover": true,
   "defaults": {
-    "runtime": "openclaw",
+    "runtime": "openclaw_model",
     "max_session_turns": 0,
     "max_prompt_chars": 6000,
     "allow_session_rotation": false
   },
   "agents": [
-    { "agent_name": "assistant", "runtime": "openclaw" },
+    { "agent_name": "assistant", "runtime": "openclaw_model" },
     {
       "agent_name": "reviewer",
       "runtime": "custom",
@@ -65,7 +65,7 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
 Fields:
 
 - `agent_name`: stable delivery identity in Agent Bridge. This must match the joined agent name.
-- `runtime`: `openclaw` uses the built-in OpenClaw command path. Any other value requires `command`.
+- `runtime`: `openclaw_model` uses OpenClaw's stateless model capability path and does **not** create visible OpenClaw/ClawDeck sessions. `openclaw` is the legacy explicit-session path. Any other value requires `command`.
 - `command`: argv template for command-based runtimes. Supported placeholders: `{agent_name}`, `{runtime}`, `{session_id}`, `{message}`, `{prompt}`, `{timeout}`, `{model}`, `{thinking}`.
 - `model`, `thinking`, `openclaw_agent`: optional OpenClaw-specific options.
 - `env`: optional environment variables for this runtime command.
