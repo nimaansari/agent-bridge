@@ -11,6 +11,7 @@ GET    /v1/workspaces/{id}         Get workspace details
 PATCH  /v1/workspaces/{id}         Update workspace settings
 DELETE /v1/workspaces/{id}         Delete workspace
 PATCH  /v1/workspaces/{id}/members/{name}  Update agent description/role
+DELETE /v1/workspaces/{id}/members/{name}  Remove agent from session
 """
 
 import logging
@@ -443,10 +444,34 @@ async def remove_member(
     if not member:
         return json_response(ResponseCode.NOT_FOUND, "Member not found")
 
+    channel_members = db.execute(
+        select(ChannelMember)
+        .join(Channel, ChannelMember.channel_id == Channel.id)
+        .where(
+            Channel.workspace_id == workspace.id,
+            ChannelMember.agent_name == agent_name,
+        )
+    ).scalars().all()
+    for channel_member in channel_members:
+        db.delete(channel_member)
+
+    channels = db.execute(
+        select(Channel).where(
+            Channel.workspace_id == workspace.id,
+            Channel.master_agent == agent_name,
+        )
+    ).scalars().all()
+    for channel in channels:
+        channel.master_agent = None
+
     db.delete(member)
     db.commit()
 
-    return success_response({"agent_name": agent_name, "removed": True})
+    return success_response({
+        "agent_name": agent_name,
+        "removed": True,
+        "channels_removed": len(channel_members),
+    })
 
 
 # ---------------------------------------------------------------------------

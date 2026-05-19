@@ -33,6 +33,20 @@ class TestCreateWorkspace:
         assert channel["masterAgent"] == "agent-alpha"
         assert "agent-alpha" in channel["participants"]
 
+    def test_create_workspace_without_agent_starts_empty(self, client):
+        """New human-created sessions do not automatically add an agent."""
+        resp = client.post("/v1/workspaces", json={"name": "Empty Session"})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["channel"]["masterAgent"] is None
+        assert data["channel"]["participants"] == []
+
+        detail = client.get(
+            f"/v1/workspaces/{data['workspaceId']}",
+            headers={"X-Workspace-Token": data["token"]},
+        )
+        assert detail.json()["data"]["agents"] == []
+
     def test_create_workspace_with_email(self, client):
         """Creator email is stored."""
         resp = client.post("/v1/workspaces", json={
@@ -294,12 +308,17 @@ class TestRemoveMember:
         )
         assert resp.status_code == 200
         assert resp.json()["data"]["removed"] is True
+        assert resp.json()["data"]["channels_removed"] >= 1
 
-        # Verify agent no longer in discover
+        # Verify agent no longer in discover or channel participants
         disc = client.get("/v1/discover", params={"network": workspace["id"]},
                           headers={"X-Workspace-Token": workspace["token"]})
-        names = [a["address"] for a in disc.json()["data"]["agents"]]
+        data = disc.json()["data"]
+        names = [a["address"] for a in data["agents"]]
         assert "openagents:agent-to-remove" not in names
+        for channel in data["channels"]:
+            assert "agent-to-remove" not in channel["participants"]
+            assert channel["master"] != "agent-to-remove"
 
     def test_remove_nonexistent_member(self, client, workspace):
         """Removing nonexistent member returns 404."""

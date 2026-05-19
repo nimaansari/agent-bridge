@@ -223,8 +223,6 @@ export default function AgentBridgeDashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: `Agent Bridge Session ${new Date().toISOString().slice(11, 16)}`,
-          agent_name: 'mr.robot',
-          agent_type: 'openclaw',
         }),
       });
       if (!res.ok) throw new Error(`Create workspace returned ${res.status}`);

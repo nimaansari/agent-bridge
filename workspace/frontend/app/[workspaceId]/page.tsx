@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, Snowflake, User, X } from 'lucide-react';
+import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, Snowflake, Trash2, User, X } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
 
@@ -248,6 +248,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [roomNameDraft, setRoomNameDraft] = useState('');
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState('');
+  const [removingAgent, setRemovingAgent] = useState<string | null>(null);
   const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -513,6 +514,25 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     await refresh();
   };
 
+  const removeAgent = async (agent: Agent) => {
+    if (removingAgent) return;
+    const label = agentLabel(agent);
+    if (!window.confirm(`Remove ${label} from this session? They will need a fresh invite to rejoin.`)) return;
+    setRemovingAgent(agent.agentName);
+    setError(null);
+    try {
+      await apiFetch(`/v1/workspaces/${workspaceId}/members/${encodeURIComponent(agent.agentName)}`, {
+        method: 'DELETE',
+      });
+      setRoom((prev) => prev ? { ...prev, agents: prev.agents.filter((a) => a.agentName !== agent.agentName) } : prev);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to remove ${label}`);
+    } finally {
+      setRemovingAgent(null);
+    }
+  };
+
   if (!token) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 text-white">
@@ -560,9 +580,14 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                     <p className="truncate text-xs text-slate-500">id: {agent.agentName}</p>
                     <p className="mt-1 text-xs text-slate-400">{agent.agentType || 'agent'} · {agent.status}</p>
                   </div>
-                  <button className="rounded-lg p-1 text-slate-500 hover:bg-white/10 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">
-                    <Edit3 className="size-3.5" />
-                  </button>
+                  <div className="flex shrink-0 gap-1">
+                    <button className="rounded-lg p-1 text-slate-500 hover:bg-white/10 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">
+                      <Edit3 className="size-3.5" />
+                    </button>
+                    <button disabled={removingAgent === agent.agentName} className="rounded-lg p-1 text-slate-500 hover:bg-rose-500/10 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => removeAgent(agent)} title="Remove agent from session">
+                      {removingAgent === agent.agentName ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
