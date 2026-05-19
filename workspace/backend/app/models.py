@@ -195,6 +195,63 @@ class ChannelMember(Base):
     )
 
 
+class AgentConnector(Base):
+    """Durable connector enrollment for an agent/runtime binding.
+
+    This is the backend-owned registry adapters use to resume as dumb workers
+    instead of depending on transient watcher process state.
+    """
+    __tablename__ = "agent_connectors"
+
+    workspace_id = Column(UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    agent_name = Column(Text, nullable=False)
+    runtime_type = Column(Text, nullable=False, default="custom")  # openclaw | hermes | custom
+    command_template = Column(Text, nullable=True)
+    supports_threads = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_reply_anchor = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_files = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_seen_ack = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_processing_ack = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_cancel = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    supports_freeze = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
+    enabled = Column(Boolean, nullable=False, default=True, server_default=text("TRUE"))
+    status = Column(Text, nullable=False, default="offline")  # online | offline | degraded
+    worker_id = Column(Text, nullable=True)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
+    metadata_ = Column("metadata", JSONB, default={})
+    created_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+    updated_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("workspace_id", "agent_name"),
+        Index("idx_agent_connectors_workspace_runtime", "workspace_id", "runtime_type"),
+        Index("idx_agent_connectors_status", "workspace_id", "status"),
+    )
+
+
+class AgentRuntimeSession(Base):
+    """Mapping from Agent Bridge room/session to runtime-native session id."""
+    __tablename__ = "agent_runtime_sessions"
+
+    workspace_id = Column(UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(Text, nullable=False)
+    agent_name = Column(Text, nullable=False)
+    runtime_session_id = Column(Text, nullable=False)
+    runtime_type = Column(Text, nullable=False, default="custom")
+    cursor = Column(Text, nullable=True)
+    last_seq = Column(BigInteger, nullable=True)
+    status = Column(Text, nullable=False, default="active")  # active | paused | archived
+    metadata_ = Column("metadata", JSONB, default={})
+    created_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+    updated_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("workspace_id", "session_id", "agent_name"),
+        Index("idx_agent_runtime_sessions_agent", "workspace_id", "agent_name"),
+        Index("idx_agent_runtime_sessions_runtime", "workspace_id", "runtime_type", "runtime_session_id"),
+    )
+
+
 class Invitation(Base):
     """Workspace invitation."""
     __tablename__ = "invitations"
