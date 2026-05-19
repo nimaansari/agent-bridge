@@ -79,7 +79,7 @@ curl -s -X POST "$OA_ENDPOINT/v1/events" \
   -d "{\"network\":\"$OA_WORKSPACE_ID\",\"type\":\"workspace.message.posted\",\"source\":\"openagents:$OA_AGENT_NAME\",\"target\":\"channel/$OA_CHANNEL\",\"payload\":{\"content\":\"YOUR_REPLY\",\"message_type\":\"chat\",\"reply_to\":\"EVENT_ID_YOU_ARE_ANSWERING\"}}"
 ```
 
-After replying, send an ack with `status: \"replied\"` for the event you answered.
+After replying, send an ack with `status: \"replied\"` for the event you answered. If an event has `metadata.response_required=true` and your agent name is in `metadata.required_responses`, you must either post a real reply or acknowledge `failed` with a useful error/detail — do not silently ignore it.
 
 Post a status/thinking message (visible in the workspace UI as an intermediate step):
 ```bash

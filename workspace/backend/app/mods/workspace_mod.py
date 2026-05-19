@@ -1143,6 +1143,11 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         targets = [agent_name for agent_name in targets if agent_name != sender_name]
 
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
+    real_targets = [agent_name for agent_name in event.metadata["target_agents"] if agent_name != "__no_response__"]
+    if event.source.startswith("openagents:") and real_targets:
+        event.metadata["response_required"] = True
+        event.metadata["required_responses"] = real_targets
+        event.metadata.setdefault("handoff_state", "pending")
 
     # Auto-add targeted agents as channel participants so they can poll
     # for messages on this channel. Three guards:

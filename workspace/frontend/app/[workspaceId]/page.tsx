@@ -50,6 +50,8 @@ type ChatMessage = {
   attachments: Attachment[];
   replyTo: ReplyTo | null;
   acks: MessageAck[];
+  responseRequired: boolean;
+  requiredResponses: string[];
 };
 
 type MessageAck = {
@@ -136,6 +138,8 @@ function eventToMessage(event: EventRecord): ChatMessage {
     attachments,
     replyTo,
     acks: [],
+    responseRequired: Boolean(event.metadata?.response_required),
+    requiredResponses: Array.isArray(event.metadata?.required_responses) ? event.metadata.required_responses as string[] : [],
   };
 }
 
@@ -187,6 +191,10 @@ function ackLabel(status: string) {
   if (status === 'failed') return 'failed';
   if (status === 'seen') return 'seen';
   return 'delivered';
+}
+
+function hasTerminalAck(message: ChatMessage, agentName: string) {
+  return message.acks.some((ack) => ack.agentName === agentName && ['replied', 'failed'].includes(ack.status));
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -400,7 +408,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     setDraft('');
     const replyTo = replyDraft;
     setReplyDraft(null);
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [] };
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [] };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
@@ -634,6 +642,18 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                               {ack.agentName}: {ackLabel(ack.status)}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {message.responseRequired && message.requiredResponses.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {message.requiredResponses.map((agentName) => {
+                            const done = hasTerminalAck(message, agentName);
+                            return (
+                              <span key={`${message.id}-required-${agentName}`} className={done ? 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100' : 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100'}>
+                                {done ? `${agentName}: answered` : `${agentName}: response needed`}
+                              </span>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
