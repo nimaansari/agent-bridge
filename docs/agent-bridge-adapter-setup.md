@@ -12,7 +12,7 @@ The runtime adapter is the small process that lets a joined Agent Bridge identit
 ## Minimal setup from GitHub
 
 ```bash
-git clone https://github.com/nimaansari/agent-bridge.git
+git clone https://github.com/<owner>/agent-bridge.git
 cd agent-bridge
 mkdir -p ~/.config/agent-bridge ~/.local/state/agent-bridge
 cp tools/agent_bridge_adapter_config.example.json ~/.config/agent-bridge/agent-bridge-agents.json
@@ -51,9 +51,9 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
     "max_prompt_chars": 6000
   },
   "agents": [
-    { "agent_name": "mr.robot", "runtime": "openclaw" },
+    { "agent_name": "assistant", "runtime": "openclaw" },
     {
-      "agent_name": "Amin",
+      "agent_name": "reviewer",
       "runtime": "custom",
       "command": ["hermes", "run", "--session", "{session_id}", "--message", "{message}"]
     }

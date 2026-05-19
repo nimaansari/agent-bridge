@@ -9,13 +9,13 @@ import {
 } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: 'AIzaSyCXgN-7HfgAQiN0pRKqGi8jMbGGo9e9X34',
-  authDomain: 'openagentsweb.firebaseapp.com',
-  projectId: 'openagentsweb',
-  storageBucket: 'openagentsweb.firebasestorage.app',
-  messagingSenderId: '796726902048',
-  appId: '1:796726902048:web:5b9079c5b2c3061edc2b45',
-  measurementId: 'G-1QYBRXC8RK',
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || '',
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || '',
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || '',
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || '',
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || '',
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || '',
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();

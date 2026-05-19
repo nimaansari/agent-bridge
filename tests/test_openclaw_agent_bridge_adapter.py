@@ -46,10 +46,10 @@ def test_should_handle_only_stable_targeted_agent_name():
         "id": "evt-1",
         "type": "workspace.message.posted",
         "source": "human:user",
-        "payload": {"content": "Amin and mr.robot please review"},
-        "metadata": {"target_agents": ["mr.robot"]},
+        "payload": {"content": "reviewer and assistant please review"},
+        "metadata": {"target_agents": ["agent.alpha"]},
     }
-    assert should_handle(event, AgentBinding("mr.robot")) is True
+    assert should_handle(event, AgentBinding("agent.alpha")) is True
     assert should_handle(event, AgentBinding("Robot label")) is False
 
 
@@ -71,46 +71,46 @@ def test_failed_is_terminal_for_required_response_until_attempt_table_lands():
         "source": "human:user",
         "payload": {"content": "please answer"},
         "metadata": {
-            "required_responses": ["mr.robot"],
-            "handoff_responses": {"mr.robot": {"status": "failed"}},
+            "required_responses": ["agent.alpha"],
+            "handoff_responses": {"agent.alpha": {"status": "failed"}},
         },
     }
-    assert terminal_for_agent(event, "mr.robot") is True
-    assert should_handle(event, AgentBinding("mr.robot")) is False
+    assert terminal_for_agent(event, "agent.alpha") is True
+    assert should_handle(event, AgentBinding("agent.alpha")) is False
 
 
 def test_transient_failure_records_retry_backoff_without_processed_marker():
     state = {}
     event = {"id": "evt-1", "type": "workspace.message.posted", "source": "human:user", "payload": {"content": "retry me"}}
-    attempts = record_transient_failure(state, "mr.robot", event, "rate limited", 30.0)
+    attempts = record_transient_failure(state, "agent.alpha", event, "rate limited", 30.0)
     assert attempts == 1
-    assert "evt-1" not in state.get("processed_event_ids_by_agent", {}).get("mr.robot", [])
-    assert should_retry_now(state, "mr.robot", "evt-1", now=0) is False
+    assert "evt-1" not in state.get("processed_event_ids_by_agent", {}).get("agent.alpha", [])
+    assert should_retry_now(state, "agent.alpha", "evt-1", now=0) is False
 
 
 def test_should_ignore_intermediate_and_self_messages():
-    binding = AgentBinding("mr.robot")
+    binding = AgentBinding("agent.alpha")
     assert should_handle({
         "type": "workspace.message.posted",
         "source": "human:user",
         "payload": {"message_type": "status", "content": "working"},
-        "metadata": {"target_agents": ["mr.robot"]},
+        "metadata": {"target_agents": ["agent.alpha"]},
     }, binding) is False
     assert should_handle({
         "type": "workspace.message.posted",
-        "source": "openagents:mr.robot",
+        "source": "openagents:agent.alpha",
         "payload": {"message_type": "chat", "content": "reply"},
-        "metadata": {"target_agents": ["mr.robot"]},
+        "metadata": {"target_agents": ["agent.alpha"]},
     }, binding) is False
 
 
 def test_slug_creates_openclaw_safe_session_ids():
-    assert ":" not in slug("agent-bridge:workspace/channel:mr.robot")
+    assert ":" not in slug("agent-bridge:workspace/channel:agent.alpha")
 
 
 def test_runtime_session_ids_are_namespaced_by_runtime():
     state = {}
-    openclaw = AgentBinding("mr.robot", runtime="openclaw")
+    openclaw = AgentBinding("agent.alpha", runtime="openclaw")
     hermes = AgentBinding("Hermes", runtime="hermes", session_prefix="agent-bridge-hermes")
     assert session_id_for(state, "workspace:1", "channel/x", openclaw).startswith("agent-bridge-openclaw-")
     assert session_id_for(state, "workspace:1", "channel/x", hermes).startswith("agent-bridge-hermes-")
@@ -119,7 +119,7 @@ def test_runtime_session_ids_are_namespaced_by_runtime():
 
 def test_runtime_session_ids_are_isolated_per_room():
     state = {}
-    binding = AgentBinding("mr.robot", runtime="openclaw")
+    binding = AgentBinding("agent.alpha", runtime="openclaw")
     first = session_id_for(state, "workspace", "room-a", binding)
     second = session_id_for(state, "workspace", "room-b", binding)
     assert first != second
@@ -128,10 +128,10 @@ def test_runtime_session_ids_are_isolated_per_room():
 
 def test_runtime_session_rotates_after_configured_turn_limit():
     state = {}
-    binding = AgentBinding("mr.robot", runtime="openclaw", max_session_turns=1)
+    binding = AgentBinding("agent.alpha", runtime="openclaw", max_session_turns=1)
     first = maybe_rotate_before_turn(state, "workspace", "room", binding)
     state.setdefault("runtime_session_turns", {}).setdefault("openclaw", {})[
-        "workspace-room-mr.robot"
+        "workspace-room-agent.alpha"
     ] = 1
     second = maybe_rotate_before_turn(state, "workspace", "room", binding)
     assert second != first
@@ -145,18 +145,18 @@ def test_prompt_content_is_clamped_for_large_agent_messages():
     event = {
         "id": "evt-long",
         "type": "workspace.message.posted",
-        "source": "openagents:Amin",
-        "payload": {"content": long, "sender_name": "Amin"},
+        "source": "openagents:reviewer",
+        "payload": {"content": long, "sender_name": "reviewer"},
         "metadata": {},
     }
-    prompt = build_prompt(event, AgentBinding("mr.robot", max_prompt_chars=2000))
+    prompt = build_prompt(event, AgentBinding("agent.alpha", max_prompt_chars=2000))
     assert "middle truncated" in prompt
     assert len(prompt) < 3500
 
 
 def test_rotate_session_id_preserves_runtime_namespace():
     state = {}
-    binding = AgentBinding("mr.robot", runtime="openclaw")
+    binding = AgentBinding("agent.alpha", runtime="openclaw")
     first = session_id_for(state, "workspace", "channel", binding)
     rotated = rotate_session_id(state, "workspace", "channel", binding)
     assert rotated != first
@@ -164,13 +164,13 @@ def test_rotate_session_id_preserves_runtime_namespace():
 
 
 def test_legacy_agent_name_session_key_is_not_reused_for_new_room():
-    state = {"runtime_sessions": {"openclaw": {"mr.robot": "old-shared-session"}}}
-    binding = AgentBinding("mr.robot", runtime="openclaw")
+    state = {"runtime_sessions": {"openclaw": {"agent.alpha": "old-shared-session"}}}
+    binding = AgentBinding("agent.alpha", runtime="openclaw")
     migrate_legacy_state(state, [binding])
     session_id = session_id_for(state, "workspace", "new-room", binding)
     assert session_id != "old-shared-session"
-    assert "mr.robot" not in state["runtime_sessions"]["openclaw"]
-    assert state["legacy_runtime_sessions_by_agent"]["openclaw"]["mr.robot"] == "old-shared-session"
+    assert "agent.alpha" not in state["runtime_sessions"]["openclaw"]
+    assert state["legacy_runtime_sessions_by_agent"]["openclaw"]["agent.alpha"] == "old-shared-session"
 
 
 def test_command_template_supports_non_openclaw_runtimes():
@@ -188,7 +188,7 @@ def test_bridge_prompt_preserves_runtime_agnostic_session_semantics():
         "id": "evt-1",
         "type": "workspace.message.posted",
         "source": "human:user",
-        "payload": {"content": "fix bridge handling", "sender_name": "Nima"},
+        "payload": {"content": "fix bridge handling", "sender_name": "Admin"},
         "metadata": {"required_responses": ["Hermes"]},
     }
     prompt = build_prompt(event, AgentBinding("Hermes", runtime="hermes"))
@@ -206,7 +206,7 @@ def test_bridge_prompt_keeps_openclaw_session_language_for_openclaw_runtime():
         "payload": {"content": "live test"},
         "metadata": {},
     }
-    prompt = build_prompt(event, AgentBinding("mr.robot", runtime="openclaw"))
+    prompt = build_prompt(event, AgentBinding("agent.alpha", runtime="openclaw"))
     assert "real OpenClaw session turn" in prompt
     assert "runtime-agnostic" in prompt
 
@@ -220,7 +220,7 @@ def test_context_overflow_is_not_returned_as_visible_reply(monkeypatch):
     monkeypatch.setattr(adapter, "run_configured_turn", fake_turn)
     args = argparse.Namespace(network="net", channel="chan", timeout=30)
     try:
-        run_runtime_turn_with_recovery({}, args, AgentBinding("mr.robot", runtime="openclaw"), "hello")
+        run_runtime_turn_with_recovery({}, args, AgentBinding("agent.alpha", runtime="openclaw"), "hello")
     except RuntimeError as exc:
         assert "context_overflow" in str(exc)
     else:
@@ -232,7 +232,7 @@ def test_load_bindings_accepts_runtime_config(tmp_path):
     config.write_text(json.dumps({
         "defaults": {"model": "openrouter/auto"},
         "agents": [
-            {"agent_name": "mr.robot", "runtime": "openclaw"},
+            {"agent_name": "agent.alpha", "runtime": "openclaw"},
             {"agent_name": "Hermes", "runtime": "hermes", "command": ["hermes", "chat", "--session", "{session_id}"]},
         ],
     }))
@@ -247,7 +247,7 @@ def test_load_bindings_accepts_runtime_config(tmp_path):
     )
     bindings = load_bindings(args)
     assert [(b.agent_name, b.runtime, b.model) for b in bindings] == [
-        ("mr.robot", "openclaw", "openrouter/auto"),
+        ("agent.alpha", "openclaw", "openrouter/auto"),
         ("Hermes", "hermes", "openrouter/auto"),
     ]
     assert bindings[1].command == ["hermes", "chat", "--session", "{session_id}"]

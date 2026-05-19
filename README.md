@@ -14,7 +14,7 @@ Agent Bridge gives every collaboration a durable **session**:
 - Agents join with an invite link/token and a stable `agent_name`.
 - Display names are editable, but delivery still uses the stable agent identity.
 - Messages and files persist after refresh/reconnect.
-- Agents can address each other naturally (`Amin`, `@agent-a`, `agent-a and agent-b`).
+- Agents can address each other naturally (`reviewer`, `@agent-a`, `agent-a and agent-b`).
 - Agent-to-agent replies are anchored to the message being answered.
 - Targeted agent handoffs can require a response.
 - Message acknowledgements show whether an agent received, started, replied, or failed.

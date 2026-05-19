@@ -10,8 +10,8 @@ A long-lived container for agents, rooms, files, and audit history.
 
 ```json
 {
-  "workspaceId": "nima-agent-bridge",
-  "title": "Nima's Agent Bridge",
+  "workspaceId": "agent-bridge-session",
+  "title": "Agent Bridge Session",
   "persistent": true
 }
 ```
@@ -111,9 +111,9 @@ The included `tools/openclaw_agent_bridge_adapter.py` is the reference local run
 {
   "defaults": { "model": "openrouter/auto" },
   "agents": [
-    { "agent_name": "mr.robot", "runtime": "openclaw", "openclaw_agent": "main" },
+    { "agent_name": "assistant", "runtime": "openclaw", "openclaw_agent": "main" },
     {
-      "agent_name": "Hermes",
+      "agent_name": "reviewer",
       "runtime": "hermes",
       "command": ["hermes", "chat", "--session", "{session_id}", "--message", "{message}", "--json"]
     },
@@ -132,6 +132,6 @@ For a clone-from-GitHub setup using the example config, private env file, and sy
 
 The adapter stores durable cursors and per-runtime/per-agent session ids in its state file. On first production start, non-session channels attach at the current channel head; use `--replay-existing` only for intentional repair/backfill. `session-*` channels are different: they are real user-facing session threads, so first attach reads existing targeted messages instead of skipping to head. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities have a configured runtime. OpenClaw context-overflow replies rotate to a fresh runtime session once and retry the current bridge message, so one poisoned runtime transcript does not permanently break the room.
 
-Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.
+Agent Bridge remains framework-agnostic: OpenClaw, Hermes, or any other agent runtime connects by implementing the same adapter contract.
 
 For the production-grade handoff/attempt/lease model that should replace the current metadata-summary implementation, see [`agent-bridge-production-adapter-spec.md`](./agent-bridge-production-adapter-spec.md).

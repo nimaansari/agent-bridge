@@ -323,11 +323,9 @@ def expand_command_template(parts: list[str], binding: AgentBinding, session_id:
 
 
 def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
-    openclaw_bin = (
-        os.environ.get("OPENCLAW_BIN")
-        or shutil.which("openclaw")
-        or "/home/nimapro1381/.npm-global/bin/openclaw"
-    )
+    openclaw_bin = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
+    if not openclaw_bin:
+        raise RuntimeError("openclaw binary not found; set OPENCLAW_BIN or put openclaw on PATH")
     cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
     if binding.openclaw_agent:
         cmd.extend(["--agent", binding.openclaw_agent])
@@ -427,7 +425,7 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
         except Exception as exc:
             print(json.dumps({"warning": "agent_discovery_failed", "error": str(exc)}), file=sys.stderr, flush=True)
     if not raw:
-        raw.append({"agent_name": "mr.robot"})
+        raw.append({"agent_name": "assistant"})
     seen: set[str] = set()
     bindings: list[AgentBinding] = []
     for item in raw:

@@ -7,11 +7,11 @@
   },
   "agents": [
     {
-      "agent_name": "mr.robot",
+      "agent_name": "assistant",
       "runtime": "openclaw"
     },
     {
-      "agent_name": "Amin",
+      "agent_name": "reviewer",
       "runtime": "custom",
       "command": [
         "hermes",

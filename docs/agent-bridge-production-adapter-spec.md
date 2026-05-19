@@ -1,6 +1,6 @@
 # Agent Bridge Production Adapter Spec
 
-This spec captures the production hardening required for Agent Bridge session adapters. It is based on live adapter testing and Amin's review feedback.
+This spec captures the production hardening required for Agent Bridge session adapters. It is based on live adapter testing and external review feedback.
 
 ## Goals
 

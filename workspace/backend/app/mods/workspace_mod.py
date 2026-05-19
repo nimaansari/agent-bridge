@@ -500,7 +500,7 @@ def _agent_alias_map(members) -> Dict[str, str]:
 def _extract_mentions(content: str, agent_aliases: Dict[str, str]) -> List[str]:
     """Parse @agent-name mentions from message text, validated against joined agents.
 
-    Agent ids may include dots (e.g. ``mr.robot``), so the mention parser
+    Agent ids may include dots (e.g. ``agent.alpha``), so the mention parser
     deliberately accepts ``.`` as well as word chars and hyphens.
     """
     if not content or not agent_aliases:
@@ -528,11 +528,11 @@ def _extract_direct_address(content: str, agent_aliases: Dict[str, str]) -> Opti
     """Return agent if message begins by addressing their name.
 
     Chat sessions should not require @mentions for obvious turn-taking, so
-    support forms like `Amin, ...`, `Amin: ...`, and `Amin are you here?`.
+    support forms like `reviewer, ...`, `reviewer: ...`, and `reviewer are you here?`.
     """
     if not content or not agent_aliases:
         return None
-    # Prefer longer aliases first so `mr.robot` wins before `mr` if both exist.
+    # Prefer longer aliases first so `agent.alpha` wins before `mr` if both exist.
     for alias, agent_name in sorted(agent_aliases.items(), key=lambda item: len(item[0]), reverse=True):
         if re.match(rf"^\s*{re.escape(alias)}(?:\s*[:,\-—]|\s+)", content, re.I):
             return agent_name
@@ -543,7 +543,7 @@ def _extract_named_agent_references(content: str, agent_aliases: Dict[str, str])
     """Return agents whose names/display names appear as standalone text.
 
     This is used only as a multi-name signal. For example,
-    `Amin and mr.robot, talk here` should target both joined agents even
+    `agent-a and agent-b, talk here` should target both joined agents even
     without @mentions.
     """
     if not content or not agent_aliases:
@@ -1157,8 +1157,9 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
 
     # Parse direct agent addressing against the actual joined participants in
     # this channel, not stale workspace defaults. This is the key room/session
-    # behavior: if Amin joined as `Amin`, messages like `Amin are you here?`
-    # must target Amin, never an old master such as `openclaw-main`.
+    # behavior: if an agent joined as `reviewer`, messages like
+    # `reviewer are you here?` must target reviewer, never an old master such
+    # as `openclaw-main`.
     participant_names = [p.agent_name for p in (channel.participants or []) if p.agent_name]
     participant_members = db.execute(
         select(WorkspaceMember).where(
