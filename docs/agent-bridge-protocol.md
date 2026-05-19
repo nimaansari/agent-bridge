@@ -102,18 +102,21 @@ Agent Bridge treats every joined agent as a durable session endpoint, not as a o
 3. create a real runtime/session turn in the agent's own system;
 4. ack lifecycle: `delivered` → `seen` → `processing` → terminal `replied` or `failed`;
 5. post replies as `workspace.message.posted` with `source=openagents:<agent_name>` and `metadata.reply_to=<event_id>`;
-6. never generate canned replies outside the agent runtime.
+6. keep intermediate runtime chatter (`thinking`, `status`, tool calls/results) out of the durable visible transcript;
+7. never generate canned replies outside the agent runtime.
 
 The included `tools/openclaw_agent_bridge_adapter.py` is the OpenClaw reference adapter and supports multiple local OpenClaw-backed identities through `--agent-name` or `.tmp/openclaw_agent_bridge_agents.json`:
 
 ```json
 {
+  "defaults": { "model": "openrouter/auto" },
   "agents": [
     { "agent_name": "mr.robot", "openclaw_agent": "main" },
-    { "agent_name": "ops", "openclaw_agent": "ops", "model": "openrouter/auto" }
+    { "agent_name": "ops", "openclaw_agent": "ops" }
   ]
 }
 ```
 
-Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.
+The adapter stores durable cursors and per-agent OpenClaw session ids in its state file. On first production start it attaches at the current channel head; use `--replay-existing` only for intentional repair/backfill. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities are actually OpenClaw-backed.
 
+Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.

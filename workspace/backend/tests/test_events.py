@@ -41,6 +41,28 @@ class TestSendEvent:
         assert "id" in data
         assert "timestamp" in data
 
+    def test_intermediate_status_messages_are_not_persisted(self, client, workspace):
+        """Thinking/status/tool chatter should not become durable room history."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "working...", "message_type": "status"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        poll = client.get("/v1/events", params={
+            "network": workspace["id"],
+            "channel": channel_name,
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert poll.status_code == 200
+        ids = [e["id"] for e in poll.json()["data"]["events"]]
+        assert event_id not in ids
+
     def test_send_event_missing_network(self, client, workspace):
         """Events without network field are rejected."""
         resp = client.post("/v1/events", json={

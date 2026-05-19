@@ -27,11 +27,25 @@ class PersistenceMod(ObserveMod):
 
     # Event types that are handled by their mods (e.g. heartbeats update
     # workspace_members.last_heartbeat) and don't need a permanent event record.
-    _SKIP_PERSIST = frozenset({"network.ping"})
+    _SKIP_PERSIST = frozenset({"network.ping", "workspace.message.status"})
+
+    # Intermediate agent output is useful while a runtime is active, but it
+    # should not become part of the durable room transcript. Durable room
+    # history is for human/file/chat events plus structured ack state.
+    _SKIP_MESSAGE_TYPES = frozenset({"thinking", "status", "tool", "tool_call", "tool_result", "todos"})
 
     async def process(self, event: Event, context: PipelineContext) -> Optional[Event]:
         if event.type in self._SKIP_PERSIST:
             return None
+
+        if event.type == "workspace.message.posted":
+            payload = event.payload or {}
+            if payload.get("message_type") in self._SKIP_MESSAGE_TYPES:
+                logger.debug(
+                    "persistence: skipping intermediate %s message from %s",
+                    payload.get("message_type"), event.source,
+                )
+                return None
 
         from app.models import EventRecord
 
