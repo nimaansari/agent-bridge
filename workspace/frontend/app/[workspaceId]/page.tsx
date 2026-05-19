@@ -29,6 +29,8 @@ type Channel = {
   participants: string[];
   master: string | null;
   status: string;
+  created_at?: number | null;
+  last_event_at?: number | null;
 };
 type EventRecord = {
   id: string;
@@ -57,6 +59,26 @@ function agentLabel(agent?: Pick<Agent, 'agentName' | 'displayName'> | null) {
 
 function sourceName(source: string) {
   return source.replace(/^openagents:/, '').replace(/^human:/, '');
+}
+
+function channelName(address: string) {
+  return address.replace(/^channel\//, '');
+}
+
+function pickRoomChannel(channels: Channel[], currentChannel: string, workspaceId: string) {
+  const activeChannels = channels
+    .filter((channel) => channel.status !== 'deleted')
+    .sort((a, b) => (b.last_event_at || b.created_at || 0) - (a.last_event_at || a.created_at || 0));
+
+  const availableNames = new Set(activeChannels.map((channel) => channelName(channel.address)));
+  if (currentChannel && availableNames.has(currentChannel)) return currentChannel;
+
+  try {
+    const saved = window.localStorage.getItem(`agentBridgeCurrentChannel:${workspaceId}`) || '';
+    if (saved && availableNames.has(saved)) return saved;
+  } catch {}
+
+  return activeChannels[0]?.address ? channelName(activeChannels[0].address) : '';
 }
 
 function eventToMessage(event: EventRecord): ChatMessage {
@@ -107,7 +129,14 @@ async function copyText(text: string): Promise<boolean> {
 
 function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
-  const initialToken = searchParams.get('token') || '';
+  const initialToken = searchParams.get('token') || (() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem('agentBridgeWorkspaceTokens') || '{}');
+      return stored[workspaceId] || '';
+    } catch {
+      return '';
+    }
+  })();
   const [token, setToken] = useState(initialToken);
   const [tokenInput, setTokenInput] = useState(initialToken);
   const [room, setRoom] = useState<Room | null>(null);
@@ -163,13 +192,23 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       }));
       setRoom({ ...roomData, agents });
       setRoomNameDraft(roomData.name);
-      setChannels(discovery.channels || []);
-      const firstChannel = currentChannel || discovery.channels?.[0]?.address?.replace(/^channel\//, '') || '';
+      const sortedChannels = (discovery.channels || [])
+        .filter((channel) => channel.status !== 'deleted')
+        .sort((a, b) => (b.last_event_at || b.created_at || 0) - (a.last_event_at || a.created_at || 0));
+      setChannels(sortedChannels);
+      const firstChannel = pickRoomChannel(sortedChannels, currentChannel, workspaceId);
       setCurrentChannel(firstChannel);
+      if (firstChannel) {
+        try {
+          window.localStorage.setItem(`agentBridgeCurrentChannel:${workspaceId}`, firstChannel);
+        } catch {}
+      }
 
       if (firstChannel) {
         const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace.message&sort=asc&limit=200`);
         setMessages((events.events || []).map(eventToMessage).filter((m) => m.content));
+      } else {
+        setMessages([]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load room');
