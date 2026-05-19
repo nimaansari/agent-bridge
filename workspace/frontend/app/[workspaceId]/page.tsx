@@ -152,6 +152,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [editingRoom, setEditingRoom] = useState(false);
+  const [savingRoomName, setSavingRoomName] = useState(false);
   const [roomNameDraft, setRoomNameDraft] = useState('');
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState('');
@@ -191,7 +192,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         lastHeartbeatAt: a.last_heartbeat_at || null,
       }));
       setRoom({ ...roomData, agents });
-      setRoomNameDraft(roomData.name);
+      if (!editingRoom && !savingRoomName) {
+        setRoomNameDraft(roomData.name);
+      }
       const sortedChannels = (discovery.channels || [])
         .filter((channel) => channel.status !== 'deleted')
         .sort((a, b) => (b.last_event_at || b.created_at || 0) - (a.last_event_at || a.created_at || 0));
@@ -215,7 +218,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, currentChannel, token, workspaceId]);
+  }, [apiFetch, currentChannel, editingRoom, savingRoomName, token, workspaceId]);
 
   useEffect(() => {
     const key = `agentBridgeFreeze:${workspaceId}`;
@@ -310,11 +313,25 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
   const saveRoomName = async () => {
     const name = roomNameDraft.trim();
-    if (!name || !room) return;
+    if (!name || !room || savingRoomName) return;
+    const previousRoom = room;
+    setSavingRoomName(true);
     setRoom({ ...room, name });
-    setEditingRoom(false);
-    await apiFetch(`/v1/workspaces/${workspaceId}`, { method: 'PATCH', body: JSON.stringify({ name }) });
-    await refresh();
+    try {
+      const updatedRoom = await apiFetch<Room>(`/v1/workspaces/${workspaceId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      });
+      setRoom({ ...updatedRoom, agents: previousRoom.agents });
+      setRoomNameDraft(updatedRoom.name);
+      setEditingRoom(false);
+      await refresh();
+    } catch (err) {
+      setRoom(previousRoom);
+      setError(err instanceof Error ? err.message : 'Failed to rename room');
+    } finally {
+      setSavingRoomName(false);
+    }
   };
 
   const saveAgentName = async (agent: Agent) => {
@@ -390,8 +407,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="min-w-0">
             {editingRoom ? (
               <div className="flex gap-2">
-                <input autoFocus className="min-w-0 rounded-xl bg-slate-900 px-3 py-2 text-lg font-semibold outline-none ring-1 ring-cyan-300" value={roomNameDraft} onChange={(e) => setRoomNameDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveRoomName(); if (e.key === 'Escape') setEditingRoom(false); }} />
-                <button onClick={saveRoomName} className="rounded-xl bg-cyan-300 px-3 text-sm font-semibold text-slate-950">Save</button>
+                <input autoFocus disabled={savingRoomName} className="min-w-0 rounded-xl bg-slate-900 px-3 py-2 text-lg font-semibold outline-none ring-1 ring-cyan-300 disabled:opacity-60" value={roomNameDraft} onChange={(e) => setRoomNameDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') saveRoomName(); if (e.key === 'Escape' && !savingRoomName) setEditingRoom(false); }} />
+                <button disabled={savingRoomName || !roomNameDraft.trim()} onClick={saveRoomName} className="rounded-xl bg-cyan-300 px-3 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-60">{savingRoomName ? 'Saving…' : 'Save'}</button>
               </div>
             ) : (
               <button onClick={() => setEditingRoom(true)} className="group flex max-w-full items-center gap-2 text-left">
