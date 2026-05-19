@@ -393,6 +393,10 @@ def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
     max_chars = max(1000, int(binding.max_prompt_chars or 6000))
     content = clamp_text(payload.get("content") or "", max_chars)
     required = binding.agent_name in (metadata.get("required_responses") or [])
+    required_banner = (
+        f"{binding.agent_name}: response needed — this handoff explicitly requires your reply.\n"
+        if required else ""
+    )
     return (
         f"You are {binding.agent_name}, a joined agent in an Agent Bridge session. "
         f"This is {runtime_session_description(binding)} delivered by the Agent Bridge transport adapter. "
@@ -402,7 +406,7 @@ def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
         f"Agent Bridge event id: {event.get('id')}\n"
         f"Sender: {sender}\n"
         f"Response required: {required}\n"
-        f"Message:\n{content}\n"
+        f"Message:\n{required_banner}{content}\n"
     )
 
 

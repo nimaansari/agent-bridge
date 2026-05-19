@@ -211,6 +211,18 @@ def test_bridge_prompt_keeps_openclaw_session_language_for_openclaw_runtime():
     assert "runtime-agnostic" in prompt
 
 
+def test_required_handoff_prompt_includes_visible_response_needed_banner():
+    event = {
+        "id": "evt-required",
+        "source": "openagents:agent-alpha",
+        "payload": {"content": "please review the patch"},
+        "metadata": {"required_responses": ["reviewer"]},
+    }
+    prompt = build_prompt(event, AgentBinding("reviewer", runtime="openclaw"))
+    assert "Response required: True" in prompt
+    assert "reviewer: response needed" in prompt
+
+
 def test_context_overflow_is_not_returned_as_visible_reply(monkeypatch):
     import openclaw_agent_bridge_adapter as adapter
 
