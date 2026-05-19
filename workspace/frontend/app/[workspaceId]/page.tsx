@@ -216,7 +216,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         setMessages([]);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load room');
+      setError(err instanceof Error ? err.message : 'Failed to load session');
     } finally {
       setLoading(false);
     }
@@ -274,16 +274,16 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   };
 
   const agentInviteText = useMemo(() => {
-    const roomName = room?.name || 'this Agent Bridge room';
+    const roomName = room?.name || 'this Agent Bridge session';
     return [
-      `Join my Agent Bridge chat room: ${roomName}`,
+      `Join my Agent Bridge chat session: ${roomName}`,
       '',
-      `Room link: ${typeof window !== 'undefined' ? window.location.origin : ''}/${workspaceId}?token=${token}`,
-      `Room token: ${token}`,
+      `Session link: ${typeof window !== 'undefined' ? window.location.origin : ''}/${workspaceId}?token=${token}`,
+      `Session token: ${token}`,
       `Server/API: ${API_URL}`,
       '',
-      'Use the repo/path I give you, connect to this room, then send one short hello message in the chat.',
-      'Important: answer and talk inside this room. Keep replies visible in the chatbox.',
+      'Use the repo/path I give you, connect to this session, then send one short hello message in the chat.',
+      'Important: answer and talk inside this session. Keep replies visible in the chatbox.',
       'If I ask you something, reply here. If you work on something, post short progress updates here.',
       'Use your real agent name as your display name.',
       'Do not change files unless I ask you to.',
@@ -344,7 +344,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       await refresh();
     } catch (err) {
       setRoom(previousRoom);
-      setError(err instanceof Error ? err.message : 'Failed to rename room');
+      setError(err instanceof Error ? err.message : 'Failed to rename session');
     } finally {
       setSavingRoomName(false);
     }
@@ -365,10 +365,10 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 text-white">
         <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/[0.06] p-6 shadow-2xl">
           <Lock className="mb-4 size-8 text-cyan-200" />
-          <h1 className="text-xl font-semibold">Enter room token</h1>
-          <p className="mt-2 text-sm text-slate-400">This room needs its workspace token. Paste it once and I’ll remember it in this browser.</p>
-          <input className="mt-5 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="Workspace token" />
-          <button onClick={activateToken} className="mt-4 w-full rounded-2xl bg-cyan-300 px-4 py-3 font-semibold text-slate-950 hover:bg-cyan-200">Open room</button>
+          <h1 className="text-xl font-semibold">Enter session token</h1>
+          <p className="mt-2 text-sm text-slate-400">This session needs its token. Paste it once and I’ll remember it in this browser.</p>
+          <input className="mt-5 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="Session token" />
+          <button onClick={activateToken} className="mt-4 w-full rounded-2xl bg-cyan-300 px-4 py-3 font-semibold text-slate-950 hover:bg-cyan-200">Open session</button>
         </div>
       </main>
     );
@@ -381,7 +381,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="flex size-10 items-center justify-center rounded-2xl bg-cyan-300 text-slate-950"><MessageCircle className="size-5" /></div>
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Agent Bridge</p>
-            <p className="font-semibold">Simple Room</p>
+            <p className="font-semibold">Session</p>
           </div>
         </div>
 
@@ -428,11 +428,11 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
               </div>
             ) : (
               <button onClick={() => setEditingRoom(true)} className="group flex max-w-full items-center gap-2 text-left">
-                <h1 className="truncate text-xl font-semibold">{room?.name || 'Room'}</h1>
+                <h1 className="truncate text-xl font-semibold">{room?.name || 'Session'}</h1>
                 <Edit3 className="size-4 text-slate-600 group-hover:text-cyan-200" />
               </button>
             )}
-            <p className="text-xs text-slate-500">One shared chat room for humans and agents.</p>
+            <p className="text-xs text-slate-500">One shared session for humans and agents.</p>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={() => setConnectOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 lg:hidden"><Plus className="size-4" /> Add agent</button>
@@ -444,16 +444,16 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         </header>
 
         {error && <div className="border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
-        {frozen && <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Room is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
+        {frozen && <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
 
         <div className="flex-1 overflow-y-auto px-4 py-5">
           {loading && messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-slate-500"><Loader2 className="mr-2 size-5 animate-spin" /> Loading room…</div>
+            <div className="flex h-full items-center justify-center text-slate-500"><Loader2 className="mr-2 size-5 animate-spin" /> Loading session…</div>
           ) : messages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center text-slate-500">
               <Bot className="mb-4 size-12 opacity-30" />
               <p className="text-lg font-medium text-slate-300">No messages yet</p>
-              <p className="mt-1 text-sm">Say something, or add another agent to start the room.</p>
+              <p className="mt-1 text-sm">Say something, or add another agent to start the session.</p>
             </div>
           ) : (
             <div className="mx-auto max-w-4xl space-y-4">
@@ -518,7 +518,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                   <li>Paste it to the agent.</li>
                   <li>Give that agent the repo/path.</li>
                   <li>The agent joins and says hello here.</li>
-                  <li>Tell it to answer and post progress in this room.</li>
+                  <li>Tell it to answer and post progress in this session.</li>
                 </ol>
               </div>
 
@@ -527,7 +527,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                 <textarea readOnly value={agentInviteText} onFocus={(e) => e.currentTarget.select()} className="mt-3 h-40 w-full resize-none rounded-xl border border-white/10 bg-slate-900 p-3 font-mono text-xs text-slate-200 outline-none focus:border-cyan-300/60" />
               </details>
 
-              <p className="text-sm text-slate-400">When the agent connects, it appears in the left agent list. Rename it with the pencil icon if needed.</p>
+              <p className="text-sm text-slate-400">When the agent connects, it appears in the left agent list for this session. Rename it with the pencil icon if needed.</p>
             </div>
           </div>
         </div>

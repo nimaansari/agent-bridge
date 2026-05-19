@@ -199,7 +199,7 @@ export default function AgentBridgeDashboard() {
 
   const openWorkspace = useCallback((workspace: Workspace) => {
     const knownToken = workspaceTokens[workspace.workspaceId];
-    const token = knownToken || window.prompt(`Enter the workspace token for “${workspace.name}”`);
+    const token = knownToken || window.prompt(`Enter the session token for “${workspace.name}”`);
     if (!token) return;
     if (!knownToken) rememberWorkspaceToken(workspace.workspaceId, token);
     window.location.href = `/${workspace.workspaceId}?token=${encodeURIComponent(token)}`;
@@ -222,7 +222,7 @@ export default function AgentBridgeDashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: `Agent Bridge Room ${new Date().toISOString().slice(11, 16)}`,
+          name: `Agent Bridge Session ${new Date().toISOString().slice(11, 16)}`,
           agent_name: 'mr.robot',
           agent_type: 'openclaw',
         }),
@@ -262,7 +262,7 @@ export default function AgentBridgeDashboard() {
                   {health === 'checking' ? 'checking backend' : health === 'online' ? 'backend online' : 'backend degraded'}
                 </Pill>
               </div>
-              <p className="mt-1 text-sm text-slate-400">A live control room for agents, rooms, files, approvals, and operator intervention.</p>
+              <p className="mt-1 text-sm text-slate-400">A simple live session space where agents can join, chat, and be paused.</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -273,7 +273,7 @@ export default function AgentBridgeDashboard() {
               <RefreshCw className={classNames('size-4', loading && 'animate-spin')} /> Refresh
             </button>
             <button onClick={createDemoWorkspace} disabled={creating} className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60">
-              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} New room
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} New session
             </button>
           </div>
         </header>
@@ -287,38 +287,38 @@ export default function AgentBridgeDashboard() {
         {createdToken && (
           <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50 md:flex-row md:items-center md:justify-between">
             <div>
-              Created room <span className="font-mono">{createdToken.workspaceId}</span>. Workspace token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
+              Created session <span className="font-mono">{createdToken.workspaceId}</span>. Session token: <span className="font-mono text-cyan-200">{createdToken.token}</span>
             </div>
             <a href={`/${createdToken.workspaceId}?token=${encodeURIComponent(createdToken.token)}`} className="inline-flex shrink-0 items-center justify-center rounded-full bg-cyan-200 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-white">
-              Open created room
+              Open created session
             </a>
           </div>
         )}
 
         <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard label="Backend" value={health === 'online' ? 'Online' : health === 'checking' ? 'Checking' : 'Degraded'} helper={`API endpoint ${API_URL}`} icon={RadioTower} tone="emerald" />
-          <StatCard label="Rooms" value={workspaces.length} helper="Persistent collaboration workspaces" icon={MessageSquareText} tone="cyan" />
+          <StatCard label="Sessions" value={workspaces.length} helper="Persistent chat sessions" icon={MessageSquareText} tone="cyan" />
           <StatCard label="Agents" value={totals.agents} helper={`${totals.online} currently online`} icon={Bot} tone="violet" />
-          <StatCard label="Storage" value="Postgres" helper="Timelines and workspace state persisted" icon={Database} tone="amber" />
+          <StatCard label="Storage" value="Postgres" helper="Timelines and session state persisted" icon={Database} tone="amber" />
         </section>
 
         <div className="grid flex-1 gap-6 xl:grid-cols-[1.35fr_0.85fr]">
           <SectionCard
-            title="Bridge rooms"
-            subtitle="Live rooms backed by the deployed API and database. Agents join these with a workspace token."
+            title="Bridge sessions"
+            subtitle="Live sessions backed by the deployed API and database. Agents join these with a session token."
             action={<Pill tone="blue">{loading ? 'syncing' : 'live'}</Pill>}
           >
             {loading && workspaces.length === 0 ? (
               <div className="flex h-72 items-center justify-center text-slate-400">
-                <Loader2 className="mr-2 size-5 animate-spin" /> Loading rooms…
+                <Loader2 className="mr-2 size-5 animate-spin" /> Loading sessions…
               </div>
             ) : workspaces.length === 0 ? (
               <div className="flex h-72 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-white/[0.03] text-center">
                 <Boxes className="mb-4 size-10 text-slate-500" />
-                <h3 className="text-base font-semibold text-white">No rooms yet</h3>
-                <p className="mt-2 max-w-md text-sm text-slate-400">Create the first Agent Bridge room, then connect OpenClaw, Hermes, Codex, or another adapter into it.</p>
+                <h3 className="text-base font-semibold text-white">No sessions yet</h3>
+                <p className="mt-2 max-w-md text-sm text-slate-400">Create the first Agent Bridge session, then connect OpenClaw, Hermes, Codex, or another adapter into it.</p>
                 <button onClick={createDemoWorkspace} disabled={creating} className="mt-5 inline-flex items-center gap-2 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200">
-                  <Plus className="size-4" /> Create first room
+                  <Plus className="size-4" /> Create first session
                 </button>
               </div>
             ) : (
@@ -339,7 +339,7 @@ export default function AgentBridgeDashboard() {
                         </div>
                       </div>
                       <button type="button" onClick={() => openWorkspace(workspace)} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
-                        {workspaceTokens[workspace.workspaceId] ? 'Open room' : 'Open with token'}
+                        {workspaceTokens[workspace.workspaceId] ? 'Open session' : 'Open with token'}
                       </button>
                     </div>
                     {!!workspace.agents?.length && (
@@ -369,7 +369,7 @@ export default function AgentBridgeDashboard() {
               <div className="grid gap-3">
                 {[
                   { icon: Bot, label: 'Agent presence', value: `${totals.online}/${totals.agents} online`, tone: 'green' as const },
-                  { icon: MessageSquareText, label: 'Room timelines', value: 'append-only events', tone: 'blue' as const },
+                  { icon: MessageSquareText, label: 'Session timelines', value: 'append-only events', tone: 'blue' as const },
                   { icon: FileText, label: 'File exchange', value: 'API mounted', tone: 'slate' as const },
                   { icon: ShieldCheck, label: 'Approvals', value: 'operator gated', tone: 'amber' as const },
                 ].map((item) => (
@@ -384,11 +384,11 @@ export default function AgentBridgeDashboard() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Connector quick start" subtitle="Point agents at this bridge API and room token.">
+            <SectionCard title="Connector quick start" subtitle="Point agents at this bridge API and session token.">
               <div className="space-y-3 rounded-2xl bg-black/35 p-4 font-mono text-xs text-slate-300 ring-1 ring-white/10">
                 <div><span className="text-slate-500">BRIDGE_API=</span>{API_URL}</div>
                 <div><span className="text-slate-500">DASHBOARD=</span>{typeof window !== 'undefined' ? window.location.origin : 'http://host:3011'}</div>
-                <div><span className="text-slate-500">AUTH=</span>workspace token per room</div>
+                <div><span className="text-slate-500">AUTH=</span>session token</div>
               </div>
               <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-2xl bg-white/[0.04] p-3 ring-1 ring-white/10">
