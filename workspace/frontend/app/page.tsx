@@ -148,6 +148,7 @@ export default function AgentBridgeDashboard() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createdToken, setCreatedToken] = useState<{ workspaceId: string; token: string } | null>(null);
+  const [workspaceTokens, setWorkspaceTokens] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -174,10 +175,35 @@ export default function AgentBridgeDashboard() {
   }, []);
 
   useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('agentBridgeWorkspaceTokens');
+      if (stored) setWorkspaceTokens(JSON.parse(stored));
+    } catch {
+      setWorkspaceTokens({});
+    }
+
     refresh();
     const timer = window.setInterval(refresh, 15000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  const rememberWorkspaceToken = useCallback((workspaceId: string, token: string) => {
+    setWorkspaceTokens((prev) => {
+      const next = { ...prev, [workspaceId]: token };
+      try {
+        window.localStorage.setItem('agentBridgeWorkspaceTokens', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const openWorkspace = useCallback((workspace: Workspace) => {
+    const knownToken = workspaceTokens[workspace.workspaceId];
+    const token = knownToken || window.prompt(`Enter the workspace token for “${workspace.name}”`);
+    if (!token) return;
+    if (!knownToken) rememberWorkspaceToken(workspace.workspaceId, token);
+    window.location.href = `/${workspace.workspaceId}?token=${encodeURIComponent(token)}`;
+  }, [rememberWorkspaceToken, workspaceTokens]);
 
   const totals = useMemo(() => {
     const agents = workspaces.reduce((sum, ws) => sum + (ws.agents?.length || 0), 0);
@@ -204,6 +230,7 @@ export default function AgentBridgeDashboard() {
       if (!res.ok) throw new Error(`Create workspace returned ${res.status}`);
       const payload = unwrap<{ workspaceId: string; token: string }>(await res.json());
       setCreatedToken(payload);
+      rememberWorkspaceToken(payload.workspaceId, payload.token);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to create workspace');
@@ -306,9 +333,9 @@ export default function AgentBridgeDashboard() {
                           {workspace.slug && <span className="inline-flex items-center gap-1"><KeyRound className="size-3.5" /> slug {workspace.slug}</span>}
                         </div>
                       </div>
-                      <a href={`/${workspace.workspaceId}`} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
-                        Open room
-                      </a>
+                      <button type="button" onClick={() => openWorkspace(workspace)} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
+                        {workspaceTokens[workspace.workspaceId] ? 'Open room' : 'Open with token'}
+                      </button>
                     </div>
                     {!!workspace.agents?.length && (
                       <div className="mt-4 grid gap-2 md:grid-cols-2">
