@@ -118,7 +118,9 @@ async def send_event(
         # from generic auth failures.
         reason = exc.reason or "rejected"
         code = ResponseCode.BAD_REQUEST if (
-            reason.startswith("reply_") or reason.startswith("duplicate_agent_message")
+            reason.startswith("reply_")
+            or reason.startswith("duplicate_agent_message")
+            or reason.startswith("runtime_failure_message")
         ) else (
             ResponseCode.FORBIDDEN if (
                 "forbidden" in reason or "locked" in reason or "frozen" in reason
