@@ -166,7 +166,8 @@ function eventsToMessages(events: EventRecord[]): ChatMessage[] {
     .filter((event) => event.type !== 'workspace.message.ack')
     .map(eventToMessage)
     .map((message) => ({ ...message, acks: ackMap.get(message.id) || [] }))
-    .filter((message) => message.content || message.attachments.length);
+    .filter((message) => message.content || message.attachments.length)
+    .sort((a, b) => a.timestamp - b.timestamp);
 }
 
 function fileSize(bytes: number) {
@@ -224,17 +225,8 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 function RoomPageContent({ workspaceId }: { workspaceId: string }) {
-  const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
-  const initialToken = searchParams.get('token') || (() => {
-    try {
-      const stored = JSON.parse(window.localStorage.getItem('agentBridgeWorkspaceTokens') || '{}');
-      return stored[workspaceId] || '';
-    } catch {
-      return '';
-    }
-  })();
-  const [token, setToken] = useState(initialToken);
-  const [tokenInput, setTokenInput] = useState(initialToken);
+  const [token, setToken] = useState('');
+  const [tokenInput, setTokenInput] = useState('');
   const [room, setRoom] = useState<Room | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [currentChannel, setCurrentChannel] = useState<string>('');
@@ -257,6 +249,22 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const nextToken = searchParams.get('token') || (() => {
+      try {
+        const stored = JSON.parse(window.localStorage.getItem('agentBridgeWorkspaceTokens') || '{}');
+        return stored[workspaceId] || '';
+      } catch {
+        return '';
+      }
+    })();
+    if (nextToken) {
+      setToken(nextToken);
+      setTokenInput(nextToken);
+    }
+  }, [workspaceId]);
 
   const authHeaders = useCallback(() => ({
     'Content-Type': 'application/json',
@@ -309,7 +317,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       }
 
       if (firstChannel) {
-        const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace&sort=asc&limit=200`);
+        const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace&sort=desc&limit=200`);
         setMessages(eventsToMessages(events.events || []));
       } else {
         setMessages([]);
