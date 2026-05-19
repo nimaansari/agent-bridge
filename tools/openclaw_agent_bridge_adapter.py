@@ -232,6 +232,23 @@ def cursor_key(network: str, channel: str) -> str:
     return f"{network}:{channel}"
 
 
+def is_session_channel(channel: str) -> bool:
+    """Return true for Agent Bridge session channels.
+
+    `session-*` channels are the durable user-facing session threads. When an
+    adapter first attaches to one, it must read the existing targeted messages
+    in that session instead of skipping to the current head; otherwise a human
+    can create/invite an agent and the first preexisting prompt is silently
+    missed. Non-session channels keep the historical attach-at-head default to
+    avoid replaying old operational traffic.
+    """
+    return bool(channel and channel.startswith("session-"))
+
+
+def should_attach_at_head(channel: str, replay_existing: bool) -> bool:
+    return not replay_existing and not is_session_channel(channel)
+
+
 def run_command(cmd: list[str], timeout: int, extra_env: dict[str, str] | None = None) -> str:
     env = os.environ.copy()
     if extra_env:
@@ -543,10 +560,13 @@ def main() -> int:
             print(f"baselined {len(events)} events for {', '.join(b.agent_name for b in bindings)}")
             return 0
 
-        if not cursor and events and not args.replay_existing:
+        if not cursor and polled_events and should_attach_at_head(args.channel, args.replay_existing):
             # First production start should attach at the current session head
             # rather than replaying old room history. Operators can opt into
             # replay with --replay-existing for repair/backfill jobs.
+            # Exception: session-* channels are real user-facing session
+            # threads, so first attach must process preexisting targeted human
+            # prompts in that session instead of skipping them.
             cursor = data.get("newest_id")
             if cursor:
                 state.setdefault("cursors", {})[cursor_key(args.network, args.channel)] = cursor

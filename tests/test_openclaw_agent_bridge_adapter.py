@@ -11,11 +11,13 @@ from openclaw_agent_bridge_adapter import (
     build_prompt,
     clean_reply,
     expand_command_template,
+    is_session_channel,
     load_bindings,
     migrate_legacy_state,
     record_transient_failure,
     rotate_session_id,
     session_id_for,
+    should_attach_at_head,
     should_handle,
     should_retry_now,
     slug,
@@ -46,6 +48,17 @@ def test_should_handle_only_stable_targeted_agent_name():
     }
     assert should_handle(event, AgentBinding("mr.robot")) is True
     assert should_handle(event, AgentBinding("Robot label")) is False
+
+
+def test_session_channels_do_not_attach_at_head_by_default():
+    assert is_session_channel("session-alpha") is True
+    assert should_attach_at_head("session-alpha", replay_existing=False) is False
+
+
+def test_non_session_channels_attach_at_head_unless_replay_requested():
+    assert is_session_channel("channel-alpha") is False
+    assert should_attach_at_head("channel-alpha", replay_existing=False) is True
+    assert should_attach_at_head("channel-alpha", replay_existing=True) is False
 
 
 def test_failed_transient_is_not_terminal_for_required_response():
