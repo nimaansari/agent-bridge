@@ -16,6 +16,7 @@ from openclaw_agent_bridge_adapter import (
     migrate_legacy_state,
     record_transient_failure,
     rotate_session_id,
+    run_runtime_turn_with_recovery,
     session_id_for,
     should_attach_at_head,
     should_handle,
@@ -178,6 +179,22 @@ def test_bridge_prompt_keeps_openclaw_session_language_for_openclaw_runtime():
     prompt = build_prompt(event, AgentBinding("mr.robot", runtime="openclaw"))
     assert "real OpenClaw session turn" in prompt
     assert "runtime-agnostic" in prompt
+
+
+def test_context_overflow_is_not_returned_as_visible_reply(monkeypatch):
+    import openclaw_agent_bridge_adapter as adapter
+
+    def fake_turn(binding, session_id, prompt, timeout):
+        return "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model."
+
+    monkeypatch.setattr(adapter, "run_configured_turn", fake_turn)
+    args = argparse.Namespace(network="net", channel="chan", timeout=30)
+    try:
+        run_runtime_turn_with_recovery({}, args, AgentBinding("mr.robot", runtime="openclaw"), "hello")
+    except RuntimeError as exc:
+        assert "context_overflow" in str(exc)
+    else:
+        raise AssertionError("context overflow must raise instead of becoming chat")
 
 
 def test_load_bindings_accepts_runtime_config(tmp_path):

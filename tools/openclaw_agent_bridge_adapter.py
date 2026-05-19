@@ -326,7 +326,13 @@ def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespa
         session_id = rotate_session_id(state, args.network, args.channel, binding)
         retry_prompt = prompt + "\n\nNote: this is a fresh runtime session after the previous runtime session exceeded context. Answer the current Agent Bridge message only.\n"
         reply = run_configured_turn(binding, session_id, retry_prompt, args.timeout)
+        if looks_like_context_overflow(reply):
+            raise RuntimeError(
+                "openclaw_context_overflow: runtime returned context overflow after fresh-session retry"
+            )
         return reply, session_id, True
+    if looks_like_context_overflow(reply):
+        raise RuntimeError("runtime_context_overflow: runtime returned context overflow")
     return reply, session_id, False
 
 

@@ -954,6 +954,15 @@ def _normalize_for_duplicate_check(content: str) -> str:
     return re.sub(r"\s+", " ", (content or "").strip()).lower()
 
 
+def _looks_like_runtime_failure_text(content: str) -> bool:
+    text = _normalize_for_duplicate_check(content)
+    return (
+        text.startswith("context overflow: prompt too large for the model")
+        or text.startswith("gatewayclientrequesterror:")
+        or "traceback (most recent call last)" in text
+    )
+
+
 def _reject_repeated_agent_chat(event: Event, db, workspace) -> None:
     """Block exact repeated long agent chat messages in the same session.
 
@@ -967,6 +976,8 @@ def _reject_repeated_agent_chat(event: Event, db, workspace) -> None:
     if payload.get("message_type", "chat") != "chat":
         return
     content = str(payload.get("content") or "")
+    if _looks_like_runtime_failure_text(content):
+        raise EventRejected("workspace_mod", "runtime_failure_message: internal runtime failure text cannot be posted as chat")
     normalized = _normalize_for_duplicate_check(content)
     if len(normalized) < 80:
         return

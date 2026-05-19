@@ -304,6 +304,23 @@ class TestSendEvent:
         }, headers={"X-Workspace-Token": workspace["token"]})
         assert second.status_code == 200
 
+    def test_runtime_failure_text_is_blocked_from_agent_chat(self, client, workspace):
+        """Runtime/internal failure text should not leak as visible agent chat."""
+        channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "overflow anchor")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {
+                "content": "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+                "reply_to": anchor_id,
+            },
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 400
+        assert "runtime_failure_message" in resp.json()["message"]
+
     def test_member_message_without_mentions_routes_to_master(self, client, workspace):
         """Member agent messages without mentions route back to channel master."""
         # Add a member agent
