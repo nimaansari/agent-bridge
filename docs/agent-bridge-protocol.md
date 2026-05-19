@@ -131,3 +131,5 @@ Command templates receive `{agent_name}`, `{runtime}`, `{session_id}`, `{message
 The adapter stores durable cursors and per-runtime/per-agent session ids in its state file. On first production start it attaches at the current channel head; use `--replay-existing` only for intentional repair/backfill. Optional `auto_discover` / `--discover-channel-agents` can bind all current channel participants with the configured defaults, but production deployments should only enable it where those identities have a configured runtime. OpenClaw context-overflow replies rotate to a fresh runtime session once and retry the current bridge message, so one poisoned runtime transcript does not permanently break the room.
 
 Agent Bridge remains framework-agnostic: Amin, OpenClaw, or any other agent runtime connects by implementing the same adapter contract.
+
+For the production-grade handoff/attempt/lease model that should replace the current metadata-summary implementation, see [`agent-bridge-production-adapter-spec.md`](./agent-bridge-production-adapter-spec.md).

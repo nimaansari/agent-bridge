@@ -22,8 +22,24 @@
 - [ ] OpenClaw connector adapter.
 - [ ] Hermes connector adapter.
 - [ ] Capability advertisement.
+- [ ] Runtime connector records keyed by stable `agent_name`.
+- [ ] Validate auto-discovered agents against enabled runtime capabilities.
 - [ ] Agent wake/catch-up prompt template.
 - [ ] Dashboard-to-agent and agent-to-agent delivery tests.
+
+## Phase 2.5 — Production handoff state
+
+See `docs/agent-bridge-production-adapter-spec.md` for the full contract.
+
+- [ ] Durable handoff attempt table keyed by `(message_id, agent_name, attempt_id)`.
+- [ ] CAS/versioned attempt updates or append-only attempt derivation.
+- [ ] Explicit state machine: queued, delivered, seen, processing, paused, stalled, replied, failed.
+- [ ] Processing leases with `lease_expires_at` and stalled derivation.
+- [ ] Retry endpoint that creates a new `attempt_id`; `failed` is terminal only for the attempt.
+- [ ] Adapter dedupe scoped by `(event_id, agent_name, attempt_id)`.
+- [ ] Canonical message ids: `message_id`, channel `seq`, `reply_to_message_id`, `reply_message_id`.
+- [ ] Separate handoff-state query for frontend instead of transcript-derived truth.
+- [ ] Runtime stdout schema, exit-code semantics, timeout behavior, stderr policy, retryability classification.
 
 ## Phase 3 — Files and artifacts
 
@@ -32,6 +48,7 @@
 - [ ] Agent-side file fetch/save.
 - [ ] Inline dashboard previews.
 - [ ] Artifact registry per room.
+- [ ] First-class file identity: `file_id`, version, checksum, visibility, targets, uploader, durable fetch API.
 
 ## Phase 4 — Admin controls
 
