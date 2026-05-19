@@ -586,7 +586,12 @@ class TestHandoffAttempts:
             "source": "human:user",
             "target": f"channel/{channel_name}",
             "payload": {"content": "agent-alpha please respond"},
-            "metadata": {"target_agents": ["agent-alpha"]},
+            "metadata": {
+                "target_agents": ["agent-alpha"],
+                "response_required": True,
+                "required_responses": ["agent-alpha"],
+                "handoff_state": "pending",
+            },
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
         assert resp.status_code == 200
@@ -627,7 +632,12 @@ class TestHandoffAttempts:
             "source": "human:user",
             "target": f"channel/{channel_name}",
             "payload": {"content": "agent-alpha please retry if needed"},
-            "metadata": {"target_agents": ["agent-alpha"]},
+            "metadata": {
+                "target_agents": ["agent-alpha"],
+                "response_required": True,
+                "required_responses": ["agent-alpha"],
+                "handoff_state": "pending",
+            },
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
         assert resp.status_code == 200
@@ -714,6 +724,60 @@ class TestHandoffAttempts:
         assert handoffs.status_code == 200
         data = handoffs.json()["data"]
         assert data["attempts"][0]["status"] == "stalled"
+
+    def test_stale_ack_cannot_regress_terminal_attempt(self, client, workspace):
+        """A replayed processing/failed ack must not reopen a completed handoff."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha please respond"},
+            "metadata": {
+                "target_agents": ["agent-alpha"],
+                "response_required": True,
+                "required_responses": ["agent-alpha"],
+                "handoff_state": "pending",
+            },
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        replied = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "replied",
+            "attempt_id": "attempt-1",
+            "reply_message_id": "reply-123",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert replied.status_code == 200
+
+        stale = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "processing",
+            "attempt_id": "attempt-1",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert stale.status_code == 200
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        data = handoffs.json()["data"]
+        assert data["handoff_state"] == "complete"
+        assert data["attempts"][0]["status"] == "replied"
+        assert data["attempts"][0]["reply_message_id"] == "reply-123"
+
+        inbox = client.get(
+            "/v1/agents/agent-alpha/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert inbox.status_code == 200
+        assert inbox.json()["data"]["events"] == []
 
 
 class TestAgentInbox:

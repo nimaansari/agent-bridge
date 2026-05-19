@@ -64,6 +64,7 @@ type MessageAck = {
 type ReplyTo = {
   id: string;
   type?: string;
+  source?: string;
   sender?: string;
   text: string;
 };

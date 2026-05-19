@@ -206,6 +206,17 @@ def _upsert_handoff_attempt(
             attempt_id=normalized_attempt_id,
         )
         db.add(attempt)
+
+    terminal_statuses = {"replied", "failed", "cancelled"}
+    if attempt.status in terminal_statuses:
+        # A stale adapter/watchdog can reconnect and replay older lifecycle
+        # acks (delivered/seen/processing/failed) for the same attempt after a
+        # successful reply was already recorded. Treat terminal attempts as
+        # immutable unless the caller creates a distinct attempt_id (normally
+        # via /handoffs/requeue). This keeps per-agent inbox delivery durable:
+        # a completed required response must not regress back into the queue.
+        return attempt
+
     attempt.status = status
     attempt.detail = detail
     attempt.reply_message_id = reply_message_id or _reply_message_id_from_detail(detail)
@@ -397,7 +408,7 @@ async def ack_event(
         return json_response(ResponseCode.BAD_REQUEST, f"Invalid ack status: {body.status}")
 
     session_id = _session_id_from_target(original.target)
-    _upsert_handoff_attempt(
+    attempt = _upsert_handoff_attempt(
         db,
         str(workspace.id),
         session_id,
@@ -415,6 +426,7 @@ async def ack_event(
         body.retryable,
         body.metadata,
     )
+    db.flush()
 
     attempts = db.execute(
         select(HandoffAttempt).where(
@@ -428,12 +440,12 @@ async def ack_event(
     original_metadata = dict(original.metadata_ or {})
     responses = dict(original_metadata.get("handoff_responses") or {})
     response_payload = {
-        "status": body.status,
-        "attempt_id": _attempt_id(body.attempt_id),
-        "retryable": bool(body.retryable),
-        **({"detail": body.detail} if body.detail else {}),
-        **({"reply_message_id": body.reply_message_id} if body.reply_message_id else {}),
-        **({"error_code": body.error_code} if body.error_code else {}),
+        "status": attempt.status,
+        "attempt_id": attempt.attempt_id,
+        "retryable": bool(attempt.retryable),
+        **({"detail": attempt.detail} if attempt.detail else {}),
+        **({"reply_message_id": attempt.reply_message_id} if attempt.reply_message_id else {}),
+        **({"error_code": attempt.error_code} if attempt.error_code else {}),
     }
     responses[body.agent_name] = response_payload
     original_metadata["handoff_responses"] = responses

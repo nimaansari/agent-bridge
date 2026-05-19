@@ -1012,7 +1012,7 @@ def _reject_repeated_agent_chat(event: Event, db, workspace) -> None:
             raise EventRejected("workspace_mod", "duplicate_agent_message: repeated agent chat blocked")
 
 
-def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
+def _normalize_reply_to(event: Event, db, workspace, channel, required: bool = True) -> Optional[dict]:
     """Validate and normalize reply metadata for session messages.
 
     Agent Bridge follows the ClawDeck shape: `payload.reply_to` is a small
@@ -1025,7 +1025,10 @@ def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
     reply_id = _reply_to_id(payload.get("reply_to")) or _reply_to_id(payload.get("replyTo")) \
         or _reply_to_id((event.metadata or {}).get("reply_to")) or _reply_to_id((event.metadata or {}).get("replyTo"))
     if not reply_id:
-        reply_id = _infer_agent_reply_to(event, db, workspace, channel)
+        if required:
+            reply_id = _infer_agent_reply_to(event, db, workspace, channel)
+        else:
+            return None
     if not reply_id:
         raise EventRejected("workspace_mod", "reply_required: agent messages must include reply_to")
 
@@ -1052,12 +1055,21 @@ def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
     quote = {
         "id": original.id,
         "type": original.type,
+        "source": original.source,
         "sender": original_payload.get("sender_name") or original.source,
         "text": text[:500],
     }
     event.payload = {**payload, "reply_to": quote}
     event.metadata = {**(event.metadata or {}), "reply_to": original.id}
     return quote
+
+
+def _reply_target_agent(quote: Optional[dict]) -> Optional[str]:
+    """Return the agent identity being replied to, if the anchor is an agent message."""
+    if not quote:
+        return None
+    source = str(quote.get("source") or quote.get("sender") or "")
+    return source[len("openagents:"):] if source.startswith("openagents:") else None
 
 
 async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional[Event]:
@@ -1151,9 +1163,18 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     # Humans can send normal top-level messages. Agents must reply to a
     # concrete message/file event in the same session channel, so their
     # output is always anchored and auditable instead of floating in the room.
+    reply_quote = None
     if event.source.startswith("openagents:"):
-        _normalize_reply_to(event, db, workspace, channel)
+        reply_quote = _normalize_reply_to(event, db, workspace, channel, required=True)
         _reject_repeated_agent_chat(event, db, workspace)
+    elif event.source.startswith("human:"):
+        # Humans can send top-level messages, but when they do use Reply, keep
+        # the exact same normalized quote shape as agent replies and use the
+        # anchor for routing. This makes Agent Bridge behave like a real chat
+        # session: replying to Amin routes to Amin even if the text says only
+        # "yes" or "fix this".
+        reply_quote = _normalize_reply_to(event, db, workspace, channel, required=False)
+    reply_target = _reply_target_agent(reply_quote)
 
     # Parse direct agent addressing against the actual joined participants in
     # this channel, not stale workspace defaults. This is the key room/session
@@ -1180,8 +1201,14 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
 
     if event.source.startswith("human:") and mentions:
         targets = mentions
+    elif event.source.startswith("human:") and reply_target:
+        targets = [reply_target]
     elif event.source.startswith("human:") and _looks_like_group_chat_request(content):
         targets = _all_channel_agents(channel)
+    elif event.source.startswith("openagents:") and mentions:
+        targets = mentions
+    elif event.source.startswith("openagents:") and reply_target:
+        targets = [reply_target]
     # ── Multi-agent channel: use LLM/router unless human asked the group ──
     elif len(channel.participants or []) >= 2:
         from app.config import config
