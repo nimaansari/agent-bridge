@@ -503,6 +503,19 @@ def _extract_leading_mention(content: str, known_agents: List[str]) -> Optional[
     return None
 
 
+def _extract_direct_address(content: str, known_agents: List[str]) -> Optional[str]:
+    """Return agent if message begins with `Name, ...` or `Name: ...`.
+
+    Chat rooms should not require @mentions for obvious turn-taking.
+    """
+    if not content or not known_agents:
+        return None
+    for agent_name in known_agents:
+        if re.match(rf"^\s*{re.escape(agent_name)}\s*[:,\-—]", content, re.I):
+            return agent_name
+    return None
+
+
 def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
     """Determine target agents when LLM router is unavailable.
 
@@ -914,6 +927,9 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         ).scalars().all()
     ]
     mentions = _extract_mentions(content, known_agents)
+    direct_address = _extract_direct_address(content, known_agents)
+    if direct_address and direct_address not in mentions:
+        mentions.insert(0, direct_address)
 
     # Resolve channel (needed for both agent and human message routing)
     channel = None
