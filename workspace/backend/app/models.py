@@ -70,25 +70,40 @@ class EventRecord(Base):
 
 
 class HandoffAttempt(Base):
-    """Durable per-agent delivery/processing attempt for a required reply."""
+    """Durable per-agent delivery/processing attempt for a required reply.
+
+    Attempts are scoped to the room/session and target agent so retries in one
+    thread cannot poison another thread's obligation state.  A failed attempt is
+    terminal only for that attempt; retryable obligations create a new attempt.
+    """
     __tablename__ = "handoff_attempts"
 
-    message_id = Column(Text, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
     workspace_id = Column(UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
-    agent_name = Column(Text, nullable=False)
+    session_id = Column(Text, nullable=False)
+    message_id = Column(Text, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
+    target_agent = Column(Text, nullable=False)
     attempt_id = Column(Text, nullable=False, default="default")
+
     status = Column(Text, nullable=False, default="queued")
+    retryable = Column(Boolean, nullable=False, default=False, server_default=text("FALSE"))
     detail = Column(Text, nullable=True)
     reply_message_id = Column(Text, nullable=True)
     lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    worker_id = Column(Text, nullable=True)
+    runtime = Column(Text, nullable=True)
+    error_code = Column(Text, nullable=True)
+    error_detail = Column(Text, nullable=True)
+    superseded_by_attempt_id = Column(Text, nullable=True)
     attempt_metadata = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
     updated_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+    terminal_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        PrimaryKeyConstraint("message_id", "agent_name", "attempt_id"),
-        Index("idx_handoff_attempts_workspace_message", "workspace_id", "message_id"),
-        Index("idx_handoff_attempts_agent_status", "workspace_id", "agent_name", "status"),
+        PrimaryKeyConstraint("workspace_id", "session_id", "message_id", "target_agent", "attempt_id"),
+        Index("idx_handoff_attempts_workspace_session_message", "workspace_id", "session_id", "message_id"),
+        Index("idx_handoff_attempts_agent_status", "workspace_id", "target_agent", "status"),
+        Index("idx_handoff_attempts_lease", "workspace_id", "status", "lease_expires_at"),
     )
 
 

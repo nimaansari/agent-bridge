@@ -27,28 +27,50 @@ def upgrade() -> None:
         return
     op.create_table(
         "handoff_attempts",
-        sa.Column("message_id", sa.Text(), nullable=False),
         sa.Column("workspace_id", postgresql.UUID(as_uuid=False), nullable=False),
-        sa.Column("agent_name", sa.Text(), nullable=False),
+        sa.Column("session_id", sa.Text(), nullable=False),
+        sa.Column("message_id", sa.Text(), nullable=False),
+        sa.Column("target_agent", sa.Text(), nullable=False),
         sa.Column("attempt_id", sa.Text(), nullable=False, server_default="default"),
         sa.Column("status", sa.Text(), nullable=False, server_default="queued"),
+        sa.Column("retryable", sa.Boolean(), nullable=False, server_default=sa.text("FALSE")),
         sa.Column("detail", sa.Text(), nullable=True),
         sa.Column("reply_message_id", sa.Text(), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("worker_id", sa.Text(), nullable=True),
+        sa.Column("runtime", sa.Text(), nullable=True),
+        sa.Column("error_code", sa.Text(), nullable=True),
+        sa.Column("error_detail", sa.Text(), nullable=True),
+        sa.Column("superseded_by_attempt_id", sa.Text(), nullable=True),
         sa.Column("attempt_metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=True),
+        sa.Column("terminal_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["message_id"], ["events.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("message_id", "agent_name", "attempt_id"),
+        sa.PrimaryKeyConstraint("workspace_id", "session_id", "message_id", "target_agent", "attempt_id"),
     )
-    op.create_index("idx_handoff_attempts_workspace_message", "handoff_attempts", ["workspace_id", "message_id"])
-    op.create_index("idx_handoff_attempts_agent_status", "handoff_attempts", ["workspace_id", "agent_name", "status"])
+    op.create_index(
+        "idx_handoff_attempts_workspace_session_message",
+        "handoff_attempts",
+        ["workspace_id", "session_id", "message_id"],
+    )
+    op.create_index(
+        "idx_handoff_attempts_agent_status",
+        "handoff_attempts",
+        ["workspace_id", "target_agent", "status"],
+    )
+    op.create_index(
+        "idx_handoff_attempts_lease",
+        "handoff_attempts",
+        ["workspace_id", "status", "lease_expires_at"],
+    )
 
 
 def downgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if _has_table(inspector, "handoff_attempts"):
+        op.drop_index("idx_handoff_attempts_lease", table_name="handoff_attempts")
         op.drop_index("idx_handoff_attempts_agent_status", table_name="handoff_attempts")
-        op.drop_index("idx_handoff_attempts_workspace_message", table_name="handoff_attempts")
+        op.drop_index("idx_handoff_attempts_workspace_session_message", table_name="handoff_attempts")
         op.drop_table("handoff_attempts")

@@ -9,6 +9,7 @@ GET  /v1/events    Poll events (filter by after, target, channel, type)
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query
@@ -47,16 +48,53 @@ class SendEventRequest(BaseModel):
 class AckEventRequest(BaseModel):
     network: str
     agent_name: str
-    status: str  # delivered | seen | processing | replied | failed
+    status: str  # queued | delivered | seen | processing | paused | stalled | replied | failed | cancelled
     detail: Optional[str] = None
     source: Optional[str] = None
     attempt_id: Optional[str] = None
     reply_message_id: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    runtime: Optional[str] = None
+    error_code: Optional[str] = None
+    error_detail: Optional[str] = None
+    retryable: Optional[bool] = None
+    metadata: Optional[dict] = None
+
+
+class RequeueHandoffRequest(BaseModel):
+    network: str
+    agent_name: str
+    attempt_id: Optional[str] = None
+    from_attempt_id: Optional[str] = None
+    detail: Optional[str] = None
+    worker_id: Optional[str] = None
+    runtime: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 def _attempt_id(value: Optional[str]) -> str:
     value = (value or "default").strip()
     return re.sub(r"[^A-Za-z0-9_.:-]+", "-", value)[:120] or "default"
+
+
+def _session_id_from_target(target: Optional[str]) -> str:
+    target = (target or "").strip()
+    if target.startswith("channel/"):
+        return target.split("/", 1)[1] or target
+    return target or "default"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_aware(value: Optional[datetime]) -> Optional[datetime]:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _reply_message_id_from_detail(detail: Optional[str]) -> Optional[str]:
@@ -66,38 +104,96 @@ def _reply_message_id_from_detail(detail: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _mark_expired_processing_attempts_stalled(db: Session, workspace_id: str, message_id: str) -> None:
+    now = _utcnow()
+    attempts = db.execute(
+        select(HandoffAttempt).where(
+            HandoffAttempt.workspace_id == workspace_id,
+            HandoffAttempt.message_id == message_id,
+            HandoffAttempt.status == "processing",
+            HandoffAttempt.lease_expires_at.isnot(None),
+        )
+    ).scalars().all()
+    for attempt in attempts:
+        lease_expires_at = _coerce_aware(attempt.lease_expires_at)
+        if lease_expires_at and lease_expires_at <= now:
+            attempt.status = "stalled"
+            attempt.updated_at = func.now()
+
+
 def _upsert_handoff_attempt(
     db: Session,
     workspace_id: str,
+    session_id: str,
     message_id: str,
-    agent_name: str,
+    target_agent: str,
     status: str,
     detail: Optional[str] = None,
     attempt_id: Optional[str] = None,
     reply_message_id: Optional[str] = None,
+    lease_expires_at: Optional[datetime] = None,
+    worker_id: Optional[str] = None,
+    runtime: Optional[str] = None,
+    error_code: Optional[str] = None,
+    error_detail: Optional[str] = None,
+    retryable: Optional[bool] = None,
+    metadata: Optional[dict] = None,
 ) -> HandoffAttempt:
     normalized_attempt_id = _attempt_id(attempt_id)
+    _mark_expired_processing_attempts_stalled(db, workspace_id, message_id)
     attempt = db.execute(
         select(HandoffAttempt).where(
             HandoffAttempt.workspace_id == workspace_id,
+            HandoffAttempt.session_id == session_id,
             HandoffAttempt.message_id == message_id,
-            HandoffAttempt.agent_name == agent_name,
+            HandoffAttempt.target_agent == target_agent,
             HandoffAttempt.attempt_id == normalized_attempt_id,
         )
     ).scalar_one_or_none()
     if not attempt:
         attempt = HandoffAttempt(
             workspace_id=workspace_id,
+            session_id=session_id,
             message_id=message_id,
-            agent_name=agent_name,
+            target_agent=target_agent,
             attempt_id=normalized_attempt_id,
         )
         db.add(attempt)
     attempt.status = status
     attempt.detail = detail
     attempt.reply_message_id = reply_message_id or _reply_message_id_from_detail(detail)
+    attempt.lease_expires_at = lease_expires_at
+    attempt.worker_id = worker_id
+    attempt.runtime = runtime
+    attempt.error_code = error_code
+    attempt.error_detail = error_detail
+    if retryable is not None:
+        attempt.retryable = retryable
+    if metadata is not None:
+        attempt.attempt_metadata = metadata
+    if status in {"replied", "failed", "cancelled"}:
+        attempt.terminal_at = func.now()
+    else:
+        attempt.terminal_at = None
     attempt.updated_at = func.now()
     return attempt
+
+
+def _attempt_is_obligation_terminal(attempt: HandoffAttempt) -> bool:
+    if attempt.status in {"replied", "cancelled"}:
+        return True
+    if attempt.status == "failed" and not attempt.retryable:
+        return True
+    return False
+
+
+def _latest_attempts_by_agent(attempts: list[HandoffAttempt]) -> dict[str, HandoffAttempt]:
+    latest: dict[str, HandoffAttempt] = {}
+    for attempt in attempts:
+        current = latest.get(attempt.target_agent)
+        if current is None or (attempt.created_at or datetime.min.replace(tzinfo=timezone.utc)) >= (current.created_at or datetime.min.replace(tzinfo=timezone.utc)):
+            latest[attempt.target_agent] = attempt
+    return latest
 
 
 # ---------------------------------------------------------------------------
@@ -249,36 +345,63 @@ async def ack_event(
     if not original:
         return json_response(ResponseCode.NOT_FOUND, "Event not found")
 
-    allowed = {"delivered", "seen", "processing", "replied", "failed"}
+    allowed = {"queued", "delivered", "seen", "processing", "paused", "stalled", "replied", "failed", "cancelled"}
     if body.status not in allowed:
         return json_response(ResponseCode.BAD_REQUEST, f"Invalid ack status: {body.status}")
 
+    session_id = _session_id_from_target(original.target)
     _upsert_handoff_attempt(
         db,
         str(workspace.id),
+        session_id,
         event_id,
         body.agent_name,
         body.status,
         body.detail,
         body.attempt_id,
         body.reply_message_id,
+        body.lease_expires_at,
+        body.worker_id,
+        body.runtime,
+        body.error_code,
+        body.error_detail,
+        body.retryable,
+        body.metadata,
     )
+
+    attempts = db.execute(
+        select(HandoffAttempt).where(
+            HandoffAttempt.workspace_id == str(workspace.id),
+            HandoffAttempt.session_id == session_id,
+            HandoffAttempt.message_id == event_id,
+        )
+    ).scalars().all()
+    latest_attempts = _latest_attempts_by_agent(attempts)
 
     original_metadata = dict(original.metadata_ or {})
     responses = dict(original_metadata.get("handoff_responses") or {})
-    responses[body.agent_name] = {
+    response_payload = {
         "status": body.status,
+        "attempt_id": _attempt_id(body.attempt_id),
+        "retryable": bool(body.retryable),
         **({"detail": body.detail} if body.detail else {}),
+        **({"reply_message_id": body.reply_message_id} if body.reply_message_id else {}),
+        **({"error_code": body.error_code} if body.error_code else {}),
     }
+    responses[body.agent_name] = response_payload
     original_metadata["handoff_responses"] = responses
 
     required = original_metadata.get("required_responses") or []
     if original_metadata.get("response_required") and required:
-        terminal = {"replied", "failed"}
-        if all((responses.get(agent) or {}).get("status") in terminal for agent in required):
+        required_latest = [latest_attempts.get(agent) for agent in required]
+        if all(attempt and _attempt_is_obligation_terminal(attempt) for attempt in required_latest):
             original_metadata["handoff_state"] = "complete"
-        elif any((responses.get(agent) or {}).get("status") == "processing" for agent in required):
+        elif any(attempt and attempt.status == "processing" for attempt in required_latest):
             original_metadata["handoff_state"] = "processing"
+        elif any(attempt and attempt.status == "stalled" for attempt in required_latest):
+            original_metadata["handoff_state"] = "stalled"
+        elif any(attempt and attempt.status == "paused" for attempt in required_latest):
+            original_metadata["handoff_state"] = "paused"
         else:
             original_metadata.setdefault("handoff_state", "pending")
     original.metadata_ = original_metadata
@@ -335,6 +458,95 @@ async def ack_event(
     })
 
 
+@router.post("/events/{event_id}/handoffs/requeue")
+async def requeue_event_handoff(
+    event_id: str,
+    body: RequeueHandoffRequest,
+    db: Session = Depends(get_db),
+    x_workspace_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Create a new queued attempt for a retryable obligation.
+
+    The previous attempt remains terminal/history; it is linked forward via
+    superseded_by_attempt_id so clients can show retry lineage without treating
+    `failed` as permanently processed.
+    """
+    workspace = db.execute(
+        select(Workspace).where(_workspace_filter(body.network))
+    ).scalar_one_or_none()
+    if not workspace:
+        return json_response(ResponseCode.NOT_FOUND, "Network not found")
+    if not _verify_workspace_access(workspace, x_workspace_token, authorization):
+        return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == event_id,
+        )
+    ).scalar_one_or_none()
+    if not original:
+        return json_response(ResponseCode.NOT_FOUND, "Event not found")
+
+    session_id = _session_id_from_target(original.target)
+    existing = db.execute(
+        select(HandoffAttempt).where(
+            HandoffAttempt.workspace_id == str(workspace.id),
+            HandoffAttempt.session_id == session_id,
+            HandoffAttempt.message_id == event_id,
+            HandoffAttempt.target_agent == body.agent_name,
+        ).order_by(HandoffAttempt.created_at.desc())
+    ).scalars().all()
+    previous = None
+    if body.from_attempt_id:
+        previous = next((row for row in existing if row.attempt_id == _attempt_id(body.from_attempt_id)), None)
+        if not previous:
+            return json_response(ResponseCode.NOT_FOUND, "Source attempt not found")
+    elif existing:
+        previous = existing[0]
+
+    next_attempt_id = _attempt_id(body.attempt_id) if body.attempt_id else f"attempt-{len(existing) + 1}"
+    if any(row.attempt_id == next_attempt_id for row in existing):
+        return json_response(ResponseCode.BAD_REQUEST, "Attempt already exists")
+
+    attempt = HandoffAttempt(
+        workspace_id=str(workspace.id),
+        session_id=session_id,
+        message_id=event_id,
+        target_agent=body.agent_name,
+        attempt_id=next_attempt_id,
+        status="queued",
+        retryable=False,
+        detail=body.detail,
+        worker_id=body.worker_id,
+        runtime=body.runtime,
+        attempt_metadata=body.metadata or {},
+    )
+    db.add(attempt)
+    if previous:
+        previous.superseded_by_attempt_id = next_attempt_id
+        previous.updated_at = func.now()
+
+    original_metadata = dict(original.metadata_ or {})
+    responses = dict(original_metadata.get("handoff_responses") or {})
+    responses[body.agent_name] = {"status": "queued", "attempt_id": next_attempt_id}
+    original_metadata["handoff_responses"] = responses
+    original_metadata["handoff_state"] = "pending"
+    original.metadata_ = original_metadata
+
+    db.commit()
+    return success_response({
+        "workspace_id": str(workspace.id),
+        "session_id": session_id,
+        "message_id": event_id,
+        "target_agent": body.agent_name,
+        "attempt_id": next_attempt_id,
+        "status": "queued",
+        "supersedes_attempt_id": previous.attempt_id if previous else None,
+    })
+
+
 @router.get("/events/{event_id}/handoffs")
 async def get_event_handoffs(
     event_id: str,
@@ -367,30 +579,46 @@ async def get_event_handoffs(
     if not original:
         return json_response(ResponseCode.NOT_FOUND, "Event not found")
 
+    session_id = _session_id_from_target(original.target)
+    _mark_expired_processing_attempts_stalled(db, str(workspace.id), event_id)
+    db.flush()
     attempts = db.execute(
         select(HandoffAttempt)
         .where(
             HandoffAttempt.workspace_id == workspace.id,
+            HandoffAttempt.session_id == session_id,
             HandoffAttempt.message_id == event_id,
         )
-        .order_by(HandoffAttempt.agent_name.asc(), HandoffAttempt.created_at.asc())
+        .order_by(HandoffAttempt.target_agent.asc(), HandoffAttempt.created_at.asc())
     ).scalars().all()
     return success_response({
+        "workspace_id": str(workspace.id),
+        "session_id": session_id,
         "message_id": event_id,
         "handoff_state": (original.metadata_ or {}).get("handoff_state"),
         "required_responses": (original.metadata_ or {}).get("required_responses") or [],
         "attempts": [
             {
+                "workspace_id": str(row.workspace_id),
+                "session_id": row.session_id,
                 "message_id": row.message_id,
-                "agent_name": row.agent_name,
+                "target_agent": row.target_agent,
+                "agent_name": row.target_agent,  # backward-compatible alias
                 "attempt_id": row.attempt_id,
                 "status": row.status,
+                "retryable": row.retryable,
                 "detail": row.detail,
                 "reply_message_id": row.reply_message_id,
                 "lease_expires_at": row.lease_expires_at.isoformat() if row.lease_expires_at else None,
+                "worker_id": row.worker_id,
+                "runtime": row.runtime,
+                "error_code": row.error_code,
+                "error_detail": row.error_detail,
+                "superseded_by_attempt_id": row.superseded_by_attempt_id,
                 "metadata": row.attempt_metadata or {},
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
             }
             for row in attempts
         ],

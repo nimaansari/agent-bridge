@@ -618,3 +618,99 @@ class TestHandoffAttempts:
         assert attempt["attempt_id"] == "attempt-1"
         assert attempt["status"] == "replied"
         assert attempt["reply_message_id"] == "reply-123"
+
+    def test_retryable_failed_attempt_does_not_complete_obligation_and_can_requeue(self, client, workspace):
+        """A retryable failed attempt is terminal only for that attempt, then requeue creates a new obligation attempt."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha please retry if needed"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        failed = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "failed",
+            "attempt_id": "attempt-1",
+            "retryable": True,
+            "runtime": "openclaw",
+            "worker_id": "worker-a",
+            "error_code": "timeout",
+            "error_detail": "adapter timed out",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert failed.status_code == 200
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert handoffs.status_code == 200
+        data = handoffs.json()["data"]
+        assert data["handoff_state"] != "complete"
+        assert data["session_id"] == channel_name
+        attempt = data["attempts"][0]
+        assert attempt["target_agent"] == "agent-alpha"
+        assert attempt["retryable"] is True
+        assert attempt["runtime"] == "openclaw"
+        assert attempt["worker_id"] == "worker-a"
+        assert attempt["error_code"] == "timeout"
+        assert attempt["terminal_at"] is not None
+
+        requeued = client.post(f"/v1/events/{event_id}/handoffs/requeue", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "from_attempt_id": "attempt-1",
+            "attempt_id": "attempt-2",
+            "detail": "manual retry",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert requeued.status_code == 200
+        assert requeued.json()["data"]["attempt_id"] == "attempt-2"
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        attempts = handoffs.json()["data"]["attempts"]
+        assert [row["attempt_id"] for row in attempts] == ["attempt-1", "attempt-2"]
+        assert attempts[0]["superseded_by_attempt_id"] == "attempt-2"
+        assert attempts[1]["status"] == "queued"
+
+    def test_processing_attempt_with_expired_lease_becomes_stalled(self, client, workspace):
+        """Processing without lease renewal should surface as stalled."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha please process"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        ack = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "processing",
+            "attempt_id": "attempt-1",
+            "lease_expires_at": "2000-01-01T00:00:00Z",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert ack.status_code == 200
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert handoffs.status_code == 200
+        data = handoffs.json()["data"]
+        assert data["attempts"][0]["status"] == "stalled"
