@@ -125,6 +125,9 @@ async def upload_file(
     if not _verify_workspace_access(workspace, x_workspace_token, authorization):
         return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
 
+    if (workspace.settings or {}).get("frozen"):
+        return json_response(ResponseCode.FORBIDDEN, "room_frozen: file uploads are frozen")
+
     # Save to storage backend (use basename for physical storage, full path for DB)
     file_id = str(uuid.uuid4())
     store = get_file_store()
@@ -203,6 +206,9 @@ async def upload_file_base64(
 
     if not _verify_workspace_access(workspace, x_workspace_token, authorization):
         return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    if (workspace.settings or {}).get("frozen"):
+        return json_response(ResponseCode.FORBIDDEN, "room_frozen: file uploads are frozen")
 
     organized_filename = _organize_filename(body.filename, body.content_type)
 

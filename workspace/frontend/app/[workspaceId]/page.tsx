@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, Copy, Edit3, Loader2, Lock, MessageCircle, Plus, RefreshCw, Send, Snowflake, User, X } from 'lucide-react';
+import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Send, Snowflake, User, X } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
 
@@ -46,6 +46,14 @@ type ChatMessage = {
   senderType: 'human' | 'agent' | 'system';
   content: string;
   timestamp: number;
+  attachments: Attachment[];
+};
+
+type Attachment = {
+  fileId: string;
+  filename: string;
+  contentType: string;
+  size: number;
 };
 
 function unwrap<T>(payload: T | ApiEnvelope<T>): T {
@@ -83,18 +91,42 @@ function pickRoomChannel(channels: Channel[], currentChannel: string, workspaceI
 
 function eventToMessage(event: EventRecord): ChatMessage {
   const payload = event.payload || {};
+  const attachments = Array.isArray(payload.attachments)
+    ? (payload.attachments as Attachment[])
+    : payload.file_id
+      ? [{
+        fileId: String(payload.file_id),
+        filename: String(payload.filename || 'file'),
+        contentType: String(payload.content_type || 'application/octet-stream'),
+        size: Number(payload.size || 0),
+      }]
+      : [];
   const senderType = (payload.sender_type as string) === 'human' || event.source.startsWith('human:')
     ? 'human'
     : event.type.includes('status')
       ? 'system'
       : 'agent';
+  const content = String(payload.content || (event.type === 'workspace.file.uploaded' ? 'Shared a file' : ''));
   return {
     id: event.id,
     senderName: (payload.sender_name as string) || sourceName(event.source),
     senderType,
-    content: String(payload.content || ''),
+    content,
     timestamp: event.timestamp,
+    attachments,
   };
+}
+
+function fileSize(bytes: number) {
+  if (!bytes) return 'file';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
 function timeText(ts: number) {
@@ -146,6 +178,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
   const [savingFreeze, setSavingFreeze] = useState(false);
@@ -158,6 +191,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const authHeaders = useCallback(() => ({
     'Content-Type': 'application/json',
@@ -210,8 +244,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       }
 
       if (firstChannel) {
-        const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace.message&sort=asc&limit=200`);
-        setMessages((events.events || []).map(eventToMessage).filter((m) => m.content));
+        const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace&sort=asc&limit=200`);
+        setMessages((events.events || []).map(eventToMessage).filter((m) => m.content || m.attachments.length));
       } else {
         setMessages([]);
       }
@@ -305,7 +339,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     if (!content || !currentChannel || sending || frozen) return;
     setSending(true);
     setDraft('');
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now() };
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [] };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
@@ -324,6 +358,36 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       setError(err instanceof Error ? err.message : 'Failed to send message');
     } finally {
       setSending(false);
+    }
+  };
+
+  const fileUrl = (fileId: string) => `${API_URL}/v1/files/${encodeURIComponent(fileId)}?token=${encodeURIComponent(token)}`;
+
+  const uploadFiles = async (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
+    if (!files.length || !currentChannel || uploading || frozen) return;
+    setUploading(true);
+    setError(null);
+    try {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('network', workspaceId);
+        formData.append('channel_name', currentChannel);
+        formData.append('source', 'human:user');
+        const res = await fetch(`${API_URL}/v1/files`, {
+          method: 'POST',
+          headers: token ? { 'X-Workspace-Token': token } : {},
+          body: formData,
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload file');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -471,7 +535,19 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                         {agent && <span className="text-xs text-slate-500">id: {agent.agentName}</span>}
                         <span className="ml-auto text-xs text-slate-600">{timeText(message.timestamp)}</span>
                       </div>
-                      <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">{message.content}</p>
+                      {message.content && <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">{message.content}</p>}
+                      {message.attachments.length > 0 && (
+                        <div className="mt-3 grid gap-2">
+                          {message.attachments.map((file) => (
+                            <a key={file.fileId} href={fileUrl(file.fileId)} target="_blank" rel="noreferrer" className="flex items-center gap-3 rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-200 hover:border-cyan-300/50 hover:text-white">
+                              <FileText className="size-4 shrink-0 text-cyan-200" />
+                              <span className="min-w-0 flex-1 truncate">{file.filename}</span>
+                              <span className="text-xs text-slate-500">{fileSize(file.size)}</span>
+                              <Download className="size-4 shrink-0 text-slate-500" />
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -483,6 +559,10 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
         <div className="border-t border-white/10 bg-slate-950 p-4">
           <div className="mx-auto flex max-w-4xl gap-2">
+            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => uploadFiles(e.currentTarget.files)} />
+            <button onClick={() => fileInputRef.current?.click()} disabled={frozen || uploading || !currentChannel} className="rounded-2xl border border-white/10 px-4 text-slate-300 hover:border-cyan-300/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" title="Attach files">
+              {uploading ? <Loader2 className="size-5 animate-spin" /> : <Paperclip className="size-5" />}
+            </button>
             <textarea disabled={frozen || !currentChannel} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }} placeholder={frozen ? 'Chat is frozen' : 'Type a message…'} className="max-h-40 min-h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4 disabled:opacity-50" />
             <button onClick={sendMessage} disabled={frozen || sending || !draft.trim()} className="rounded-2xl bg-cyan-300 px-4 font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"><Send className="size-5" /></button>
           </div>
