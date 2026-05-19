@@ -126,14 +126,17 @@ def test_runtime_session_ids_are_isolated_per_room():
     assert len(state["runtime_sessions"]["openclaw"]) == 2
 
 
-def test_runtime_session_rotates_after_configured_turn_limit():
+def test_runtime_session_rotation_is_opt_in():
     state = {}
-    binding = AgentBinding("agent.alpha", runtime="openclaw", max_session_turns=1)
-    first = maybe_rotate_before_turn(state, "workspace", "room", binding)
+    stable = AgentBinding("agent.alpha", runtime="openclaw", max_session_turns=1)
+    first = maybe_rotate_before_turn(state, "workspace", "room", stable)
     state.setdefault("runtime_session_turns", {}).setdefault("openclaw", {})[
         "workspace-room-agent.alpha"
     ] = 1
-    second = maybe_rotate_before_turn(state, "workspace", "room", binding)
+    assert maybe_rotate_before_turn(state, "workspace", "room", stable) == first
+
+    rotating = AgentBinding("agent.alpha", runtime="openclaw", max_session_turns=1, allow_session_rotation=True)
+    second = maybe_rotate_before_turn(state, "workspace", "room", rotating)
     assert second != first
 
 

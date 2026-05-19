@@ -2,8 +2,9 @@
   "auto_discover": true,
   "defaults": {
     "runtime": "openclaw",
-    "max_session_turns": 6,
-    "max_prompt_chars": 6000
+    "max_session_turns": 0,
+    "max_prompt_chars": 6000,
+    "allow_session_rotation": false
   },
   "agents": [
     {

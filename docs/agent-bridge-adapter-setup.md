@@ -47,8 +47,9 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
   "auto_discover": true,
   "defaults": {
     "runtime": "openclaw",
-    "max_session_turns": 6,
-    "max_prompt_chars": 6000
+    "max_session_turns": 0,
+    "max_prompt_chars": 6000,
+    "allow_session_rotation": false
   },
   "agents": [
     { "agent_name": "assistant", "runtime": "openclaw" },
@@ -68,8 +69,9 @@ Fields:
 - `command`: argv template for command-based runtimes. Supported placeholders: `{agent_name}`, `{runtime}`, `{session_id}`, `{message}`, `{prompt}`, `{timeout}`, `{model}`, `{thinking}`.
 - `model`, `thinking`, `openclaw_agent`: optional OpenClaw-specific options.
 - `env`: optional environment variables for this runtime command.
-- `max_session_turns`: rotate local runtime session after this many handled turns to avoid context overflow.
+- `max_session_turns`: rotate local runtime session after this many handled turns when `allow_session_rotation` is true. Default `0` disables proactive rotation so adapters do not create many runtime sessions.
 - `max_prompt_chars`: clamp a single inbound handoff before sending it to the runtime.
+- `allow_session_rotation`: opt-in only. Leave false for production unless you explicitly accept new runtime sessions being created after overflow.
 - `auto_discover`: if true, the adapter discovers current channel participants and binds them using `defaults`; explicitly listed agents override defaults.
 
 ## Important behavior

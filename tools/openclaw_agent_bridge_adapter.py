@@ -42,8 +42,9 @@ class AgentBinding:
     env: dict[str, str] | None = None
     session_prefix: str | None = None
     enabled: bool = True
-    max_session_turns: int = 6
+    max_session_turns: int = 0
     max_prompt_chars: int = 6000
+    allow_session_rotation: bool = False
 
 
 def slug(value: str) -> str:
@@ -268,6 +269,8 @@ def maybe_rotate_before_turn(state: dict[str, Any], network: str, channel: str, 
     # backend is the durable source of truth, so rotate local runtime sessions
     # periodically to prevent one long room from becoming unusable due to model
     # context overflow. Other runtimes can opt into the same behavior via config.
+    if not binding.allow_session_rotation:
+        return session_id_for(state, network, channel, binding)
     max_turns = max(1, int(binding.max_session_turns or 6))
     if session_turns(state, binding, network, channel) >= max_turns:
         return rotate_session_id(state, network, channel, binding)
@@ -369,7 +372,7 @@ def looks_like_context_overflow(reply: str) -> bool:
 def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespace, binding: AgentBinding, prompt: str) -> tuple[str, str, bool]:
     session_id = maybe_rotate_before_turn(state, args.network, args.channel, binding)
     reply = run_configured_turn(binding, session_id, prompt, args.timeout)
-    if (binding.runtime or "openclaw").lower() == "openclaw" and looks_like_context_overflow(reply):
+    if (binding.runtime or "openclaw").lower() == "openclaw" and binding.allow_session_rotation and looks_like_context_overflow(reply):
         session_id = rotate_session_id(state, args.network, args.channel, binding)
         retry_prompt = prompt + "\n\nNote: this is a fresh runtime session after the previous runtime session exceeded context. Answer the current Agent Bridge message only.\n"
         reply = run_configured_turn(binding, session_id, retry_prompt, args.timeout)
@@ -464,8 +467,9 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
             env=merged.get("env") if isinstance(merged.get("env"), dict) else None,
             session_prefix=merged.get("session_prefix"),
             enabled=bool(merged.get("enabled", True)),
-            max_session_turns=int(merged.get("max_session_turns", 6) or 6),
+            max_session_turns=int(merged.get("max_session_turns", 0) or 0),
             max_prompt_chars=int(merged.get("max_prompt_chars", 6000) or 6000),
+            allow_session_rotation=bool(merged.get("allow_session_rotation", False)),
         ))
     return bindings
 
