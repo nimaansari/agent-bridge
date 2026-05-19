@@ -522,6 +522,35 @@ def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
     return [participants[0]] if participants else []
 
 
+def _looks_like_group_chat_request(content: str) -> bool:
+    """Detect simple-room requests addressed to multiple agents.
+
+    Agent Bridge rooms should feel like one shared chatbox. If the human
+    says “guys”, “both”, “all”, “talk/chat”, etc., route the turn to every
+    participant instead of only the master.
+    """
+    text = (content or "").lower()
+    phrases = (
+        "guys",
+        "both",
+        "all of you",
+        "everyone",
+        "you two",
+        "talk",
+        "chat",
+        "speak",
+        "each other",
+        "start talking",
+        "start chatting",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
+def _all_channel_agents(channel) -> List[str]:
+    """Return all agent participants for simple-room broadcast turns."""
+    return [p.agent_name for p in (channel.participants or []) if p.agent_name]
+
+
 _ROUTER_PROMPT = """\
 You are a conversation router for a multi-agent workspace. Decide which \
 agent should respond next to the LATEST message. Use judgment — read the \
@@ -908,8 +937,10 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     if not channel:
         return event
 
-    # ── Multi-agent channel: always use LLM router ──────────────────
-    if len(channel.participants or []) >= 2:
+    if event.source.startswith("human:") and _looks_like_group_chat_request(content):
+        targets = _all_channel_agents(channel)
+    # ── Multi-agent channel: use LLM/router unless human asked the group ──
+    elif len(channel.participants or []) >= 2:
         from app.config import config
         if config.ROUTER_LLM_ENABLED and _get_router_api_key():
             targets = await _route_with_llm(channel, event, db, workspace)
