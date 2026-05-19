@@ -538,6 +538,23 @@ def _extract_direct_address(content: str, agent_aliases: Dict[str, str]) -> Opti
     return None
 
 
+def _extract_named_agent_references(content: str, agent_aliases: Dict[str, str]) -> List[str]:
+    """Return agents whose names/display names appear as standalone text.
+
+    This is used only as a multi-name signal. For example,
+    `Amin and mr.robot, talk here` should target both joined agents even
+    without @mentions.
+    """
+    if not content or not agent_aliases:
+        return []
+    targets: List[str] = []
+    for alias, agent_name in sorted(agent_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if re.search(rf"(?<![\w.-]){re.escape(alias)}(?![\w.-])", content, re.I):
+            if agent_name not in targets:
+                targets.append(agent_name)
+    return targets
+
+
 def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
     """Determine target agents when LLM router is unavailable.
 
@@ -984,8 +1001,13 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     ).scalars().all() if participant_names else []
     agent_aliases = _agent_alias_map(participant_members)
     mentions = _extract_mentions(content, agent_aliases)
-    direct_address = _extract_direct_address(content, agent_aliases)
-    if direct_address and direct_address not in mentions:
+    named_agents = _extract_named_agent_references(content, agent_aliases)
+    direct_address = None if len(named_agents) >= 2 else _extract_direct_address(content, agent_aliases)
+    if len(named_agents) >= 2:
+        for agent_name in named_agents:
+            if agent_name not in mentions:
+                mentions.append(agent_name)
+    elif direct_address and direct_address not in mentions:
         mentions.insert(0, direct_address)
 
     if event.source.startswith("human:") and mentions:
