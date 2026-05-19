@@ -42,6 +42,8 @@ class AgentBinding:
     env: dict[str, str] | None = None
     session_prefix: str | None = None
     enabled: bool = True
+    max_session_turns: int = 6
+    max_prompt_chars: int = 6000
 
 
 def slug(value: str) -> str:
@@ -235,7 +237,41 @@ def rotate_session_id(state: dict[str, Any], network: str, channel: str, binding
     state.setdefault("runtime_sessions", {}).setdefault(runtime, {})[key] = new_id
     if runtime == "openclaw":
         state.setdefault("openclaw_sessions", {})[key] = new_id
+    state.setdefault("runtime_session_turns", {}).setdefault(runtime, {})[key] = 0
     return new_id
+
+
+def session_turns(state: dict[str, Any], binding: AgentBinding, network: str, channel: str) -> int:
+    runtime = binding.runtime or "openclaw"
+    key = room_session_key(network, channel, binding)
+    return int(((state.get("runtime_session_turns") or {}).get(runtime) or {}).get(key) or 0)
+
+
+def increment_session_turns(state: dict[str, Any], binding: AgentBinding, network: str, channel: str) -> None:
+    runtime = binding.runtime or "openclaw"
+    key = room_session_key(network, channel, binding)
+    turns = state.setdefault("runtime_session_turns", {}).setdefault(runtime, {})
+    turns[key] = int(turns.get(key) or 0) + 1
+
+
+def maybe_rotate_before_turn(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
+    # OpenClaw explicit sessions accumulate transcript. In Agent Bridge the
+    # backend is the durable source of truth, so rotate local runtime sessions
+    # periodically to prevent one long room from becoming unusable due to model
+    # context overflow. Other runtimes can opt into the same behavior via config.
+    max_turns = max(1, int(binding.max_session_turns or 6))
+    if session_turns(state, binding, network, channel) >= max_turns:
+        return rotate_session_id(state, network, channel, binding)
+    return session_id_for(state, network, channel, binding)
+
+
+def clamp_text(value: str, max_chars: int) -> str:
+    value = value or ""
+    if len(value) <= max_chars:
+        return value
+    head = max_chars // 2
+    tail = max_chars - head
+    return value[:head].rstrip() + "\n\n[...middle truncated by Agent Bridge adapter... ]\n\n" + value[-tail:].lstrip()
 
 
 def cursor_key(network: str, channel: str) -> str:
@@ -320,7 +356,7 @@ def looks_like_context_overflow(reply: str) -> bool:
 
 
 def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespace, binding: AgentBinding, prompt: str) -> tuple[str, str, bool]:
-    session_id = session_id_for(state, args.network, args.channel, binding)
+    session_id = maybe_rotate_before_turn(state, args.network, args.channel, binding)
     reply = run_configured_turn(binding, session_id, prompt, args.timeout)
     if (binding.runtime or "openclaw").lower() == "openclaw" and looks_like_context_overflow(reply):
         session_id = rotate_session_id(state, args.network, args.channel, binding)
@@ -330,9 +366,11 @@ def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespa
             raise RuntimeError(
                 "openclaw_context_overflow: runtime returned context overflow after fresh-session retry"
             )
+        increment_session_turns(state, binding, args.network, args.channel)
         return reply, session_id, True
     if looks_like_context_overflow(reply):
         raise RuntimeError("runtime_context_overflow: runtime returned context overflow")
+    increment_session_turns(state, binding, args.network, args.channel)
     return reply, session_id, False
 
 
@@ -354,7 +392,8 @@ def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
     payload = event.get("payload") or {}
     metadata = event.get("metadata") or {}
     sender = payload.get("sender_name") or source_agent(event.get("source") or "") or event.get("source") or "unknown"
-    content = payload.get("content") or ""
+    max_chars = max(1000, int(binding.max_prompt_chars or 6000))
+    content = clamp_text(payload.get("content") or "", max_chars)
     required = binding.agent_name in (metadata.get("required_responses") or [])
     return (
         f"You are {binding.agent_name}, a joined agent in an Agent Bridge session. "
@@ -410,6 +449,8 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
             env=merged.get("env") if isinstance(merged.get("env"), dict) else None,
             session_prefix=merged.get("session_prefix"),
             enabled=bool(merged.get("enabled", True)),
+            max_session_turns=int(merged.get("max_session_turns", 6) or 6),
+            max_prompt_chars=int(merged.get("max_prompt_chars", 6000) or 6000),
         ))
     return bindings
 

@@ -9,12 +9,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 from openclaw_agent_bridge_adapter import (
     AgentBinding,
     build_prompt,
+    clamp_text,
     clean_reply,
     expand_command_template,
     is_session_channel,
     load_bindings,
     migrate_legacy_state,
     record_transient_failure,
+    maybe_rotate_before_turn,
     rotate_session_id,
     run_runtime_turn_with_recovery,
     session_id_for,
@@ -122,6 +124,34 @@ def test_runtime_session_ids_are_isolated_per_room():
     second = session_id_for(state, "workspace", "room-b", binding)
     assert first != second
     assert len(state["runtime_sessions"]["openclaw"]) == 2
+
+
+def test_runtime_session_rotates_after_configured_turn_limit():
+    state = {}
+    binding = AgentBinding("mr.robot", runtime="openclaw", max_session_turns=1)
+    first = maybe_rotate_before_turn(state, "workspace", "room", binding)
+    state.setdefault("runtime_session_turns", {}).setdefault("openclaw", {})[
+        "workspace-room-mr.robot"
+    ] = 1
+    second = maybe_rotate_before_turn(state, "workspace", "room", binding)
+    assert second != first
+
+
+def test_prompt_content_is_clamped_for_large_agent_messages():
+    long = "A" * 5000 + "B" * 5000
+    clamped = clamp_text(long, 2000)
+    assert len(clamped) < len(long)
+    assert "middle truncated" in clamped
+    event = {
+        "id": "evt-long",
+        "type": "workspace.message.posted",
+        "source": "openagents:Amin",
+        "payload": {"content": long, "sender_name": "Amin"},
+        "metadata": {},
+    }
+    prompt = build_prompt(event, AgentBinding("mr.robot", max_prompt_chars=2000))
+    assert "middle truncated" in prompt
+    assert len(prompt) < 3500
 
 
 def test_rotate_session_id_preserves_runtime_namespace():
