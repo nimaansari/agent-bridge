@@ -1138,6 +1138,10 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     # replies at once. A non-empty list that contains no real agent
     # name causes old clients to reject (they fail the includes check)
     # and new clients to treat it as "nobody" (the sentinel is ignored).
+    if event.source.startswith("openagents:"):
+        sender_name = event.source[len("openagents:"):]
+        targets = [agent_name for agent_name in targets if agent_name != sender_name]
+
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
 
     # Auto-add targeted agents as channel participants so they can poll

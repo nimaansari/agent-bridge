@@ -147,6 +147,33 @@ class TestSendEvent:
         assert reply["payload"]["reply_to"]["id"] == anchor_id
         assert reply["payload"]["reply_to"]["text"] == "Question for the agent"
 
+    def test_agent_message_never_targets_itself(self, client, workspace):
+        """Agent messages mentioning themselves should not create self-loop targets."""
+        for name in ["Amin", "mr.robot"]:
+            client.post("/v1/join", json={
+                "agent_name": name,
+                "token": workspace["token"],
+                "network": workspace["id"],
+            })
+
+        channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Amin and mr.robot discuss this")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:mr.robot",
+            "target": f"channel/{channel_name}",
+            "payload": {
+                "content": "Amin and mr.robot should improve this together.",
+                "reply_to": anchor_id,
+            },
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        targets = resp.json()["data"]["metadata"]["target_agents"]
+        assert "mr.robot" not in targets
+        assert "Amin" in targets
+
     def test_human_message_routes_to_master(self, client, workspace):
         """Human messages are routed to the channel master agent."""
         channel_name = workspace["channel"]["name"]
