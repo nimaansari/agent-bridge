@@ -8,13 +8,18 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from openclaw_agent_bridge_adapter import (
     AgentBinding,
+    build_prompt,
     clean_reply,
     expand_command_template,
     load_bindings,
+    migrate_legacy_state,
+    record_transient_failure,
     rotate_session_id,
     session_id_for,
     should_handle,
+    should_retry_now,
     slug,
+    terminal_for_agent,
 )
 
 
@@ -41,6 +46,45 @@ def test_should_handle_only_stable_targeted_agent_name():
     }
     assert should_handle(event, AgentBinding("mr.robot")) is True
     assert should_handle(event, AgentBinding("Robot label")) is False
+
+
+def test_failed_transient_is_not_terminal_for_required_response():
+    event = {
+        "id": "evt-1",
+        "type": "workspace.message.posted",
+        "source": "human:user",
+        "payload": {"content": "please answer"},
+        "metadata": {
+            "required_responses": ["mr.robot"],
+            "handoff_responses": {"mr.robot": {"status": "failed_transient"}},
+        },
+    }
+    assert terminal_for_agent(event, "mr.robot") is False
+    assert should_handle(event, AgentBinding("mr.robot")) is True
+
+
+def test_failed_terminal_is_terminal_for_required_response():
+    event = {
+        "id": "evt-1",
+        "type": "workspace.message.posted",
+        "source": "human:user",
+        "payload": {"content": "please answer"},
+        "metadata": {
+            "required_responses": ["mr.robot"],
+            "handoff_responses": {"mr.robot": {"status": "failed_terminal"}},
+        },
+    }
+    assert terminal_for_agent(event, "mr.robot") is True
+    assert should_handle(event, AgentBinding("mr.robot")) is False
+
+
+def test_transient_failure_records_retry_backoff_without_processed_marker():
+    state = {}
+    event = {"id": "evt-1", "type": "workspace.message.posted", "source": "human:user", "payload": {"content": "retry me"}}
+    attempts = record_transient_failure(state, "mr.robot", event, "rate limited", 30.0)
+    assert attempts == 1
+    assert "evt-1" not in state.get("processed_event_ids_by_agent", {}).get("mr.robot", [])
+    assert should_retry_now(state, "mr.robot", "evt-1", now=0) is False
 
 
 def test_should_ignore_intermediate_and_self_messages():
@@ -72,13 +116,32 @@ def test_runtime_session_ids_are_namespaced_by_runtime():
     assert set(state["runtime_sessions"].keys()) == {"openclaw", "hermes"}
 
 
+def test_runtime_session_ids_are_isolated_per_room():
+    state = {}
+    binding = AgentBinding("mr.robot", runtime="openclaw")
+    first = session_id_for(state, "workspace", "room-a", binding)
+    second = session_id_for(state, "workspace", "room-b", binding)
+    assert first != second
+    assert len(state["runtime_sessions"]["openclaw"]) == 2
+
+
 def test_rotate_session_id_preserves_runtime_namespace():
     state = {}
     binding = AgentBinding("mr.robot", runtime="openclaw")
     first = session_id_for(state, "workspace", "channel", binding)
     rotated = rotate_session_id(state, "workspace", "channel", binding)
     assert rotated != first
-    assert state["runtime_sessions"]["openclaw"]["mr.robot"] == rotated
+    assert rotated in state["runtime_sessions"]["openclaw"].values()
+
+
+def test_legacy_agent_name_session_key_is_not_reused_for_new_room():
+    state = {"runtime_sessions": {"openclaw": {"mr.robot": "old-shared-session"}}}
+    binding = AgentBinding("mr.robot", runtime="openclaw")
+    migrate_legacy_state(state, [binding])
+    session_id = session_id_for(state, "workspace", "new-room", binding)
+    assert session_id != "old-shared-session"
+    assert "mr.robot" not in state["runtime_sessions"]["openclaw"]
+    assert state["legacy_runtime_sessions_by_agent"]["openclaw"]["mr.robot"] == "old-shared-session"
 
 
 def test_command_template_supports_non_openclaw_runtimes():
@@ -89,6 +152,34 @@ def test_command_template_supports_non_openclaw_runtimes():
     )
     cmd = expand_command_template(binding.command, binding, "sess-1", "hello", 120)
     assert cmd == ["hermes", "chat", "--session", "sess-1", "--message", "hello", "--timeout", "120"]
+
+
+def test_bridge_prompt_preserves_runtime_agnostic_session_semantics():
+    event = {
+        "id": "evt-1",
+        "type": "workspace.message.posted",
+        "source": "human:user",
+        "payload": {"content": "fix bridge handling", "sender_name": "Nima"},
+        "metadata": {"required_responses": ["Hermes"]},
+    }
+    prompt = build_prompt(event, AgentBinding("Hermes", runtime="hermes"))
+    assert "real hermes runtime session turn" in prompt
+    assert "runtime-agnostic" in prompt
+    assert "OpenClaw, Hermes, and future joined agents" in prompt
+    assert "Response required: True" in prompt
+
+
+def test_bridge_prompt_keeps_openclaw_session_language_for_openclaw_runtime():
+    event = {
+        "id": "evt-2",
+        "type": "workspace.message.posted",
+        "source": "human:user",
+        "payload": {"content": "live test"},
+        "metadata": {},
+    }
+    prompt = build_prompt(event, AgentBinding("mr.robot", runtime="openclaw"))
+    assert "real OpenClaw session turn" in prompt
+    assert "runtime-agnostic" in prompt
 
 
 def test_load_bindings_accepts_runtime_config(tmp_path):

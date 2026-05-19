@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-TERMINAL_ACKS = {"replied", "failed"}
+TERMINAL_ACKS = {"replied", "failed_terminal"}
 DEFAULT_STATE = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_adapter_state.json"
 DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_agents.json"
 
@@ -197,25 +197,34 @@ def clean_reply(raw: str) -> str:
     return raw[-6000:] if len(raw) > 6000 else raw
 
 
+def room_session_key(network: str, channel: str, binding: AgentBinding) -> str:
+    return slug(f"{network}-{channel}-{binding.agent_name}")
+
+
 def session_id_for(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
     runtime = binding.runtime or "openclaw"
     sessions = state.setdefault("runtime_sessions", {})
     runtime_sessions = sessions.setdefault(runtime, {})
-    if binding.agent_name not in runtime_sessions:
-        # Preserve the original OpenClaw session id for existing deployments.
-        legacy = (state.get("openclaw_sessions") or {}).get(binding.agent_name)
+    key = room_session_key(network, channel, binding)
+    if key not in runtime_sessions:
+        # Preserve the original OpenClaw session id only for the same derived
+        # room key. Older adapter state was keyed by agent_name alone, which
+        # could leak one runtime conversation across different rooms.
+        legacy_sessions = state.get("openclaw_sessions") or {}
+        legacy = legacy_sessions.get(key)
         prefix = binding.session_prefix or f"agent-bridge-{runtime}"
-        runtime_sessions[binding.agent_name] = legacy or slug(f"{prefix}-{network}-{channel}-{binding.agent_name}")
-    return runtime_sessions[binding.agent_name]
+        runtime_sessions[key] = legacy or slug(f"{prefix}-{network}-{channel}-{binding.agent_name}")
+    return runtime_sessions[key]
 
 
 def rotate_session_id(state: dict[str, Any], network: str, channel: str, binding: AgentBinding) -> str:
     runtime = binding.runtime or "openclaw"
+    key = room_session_key(network, channel, binding)
     prefix = binding.session_prefix or f"agent-bridge-{runtime}"
     new_id = slug(f"{prefix}-{network}-{channel}-{binding.agent_name}-{int(time.time())}")
-    state.setdefault("runtime_sessions", {}).setdefault(runtime, {})[binding.agent_name] = new_id
+    state.setdefault("runtime_sessions", {}).setdefault(runtime, {})[key] = new_id
     if runtime == "openclaw":
-        state.setdefault("openclaw_sessions", {})[binding.agent_name] = new_id
+        state.setdefault("openclaw_sessions", {})[key] = new_id
     return new_id
 
 
@@ -294,6 +303,20 @@ def run_runtime_turn_with_recovery(state: dict[str, Any], args: argparse.Namespa
     return reply, session_id, False
 
 
+def runtime_session_description(binding: AgentBinding) -> str:
+    """Human-facing description of the bound local runtime session.
+
+    The adapter started as an OpenClaw adapter, but the bridge contract is
+    runtime-agnostic: OpenClaw, Hermes, or any future CLI-backed agent runtime
+    should receive the same semantics. Keep the prompt explicit that this is a
+    real session turn, without implying Agent Bridge only supports OpenClaw.
+    """
+    runtime = (binding.runtime or "openclaw").lower()
+    if runtime == "openclaw":
+        return "a real OpenClaw session turn"
+    return f"a real {binding.runtime} runtime session turn"
+
+
 def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
     payload = event.get("payload") or {}
     metadata = event.get("metadata") or {}
@@ -302,7 +325,8 @@ def build_prompt(event: dict[str, Any], binding: AgentBinding) -> str:
     required = binding.agent_name in (metadata.get("required_responses") or [])
     return (
         f"You are {binding.agent_name}, a joined agent in an Agent Bridge session. "
-        "This is a real OpenClaw session turn delivered by the Agent Bridge transport adapter. "
+        f"This is {runtime_session_description(binding)} delivered by the Agent Bridge transport adapter. "
+        "Agent Bridge is runtime-agnostic; preserve session semantics for OpenClaw, Hermes, and future joined agents. "
         "Respond as an agent teammate with concrete work, code-level feedback, or a clear blocker. "
         "Do not produce generic agreement or repeated protocol summaries.\n\n"
         f"Agent Bridge event id: {event.get('id')}\n"
@@ -377,10 +401,59 @@ def mark_processed(state: dict[str, Any], agent_name: str, event_id: str) -> Non
     ids = set(by_agent.get(agent_name, []))
     ids.add(event_id)
     by_agent[agent_name] = sorted(ids)[-2000:]
+    clear_retry(state, agent_name, event_id)
 
 
 def processed_set(state: dict[str, Any], agent_name: str) -> set[str]:
     return set((state.get("processed_event_ids_by_agent") or {}).get(agent_name, []))
+
+
+def retry_entry(state: dict[str, Any], agent_name: str, event_id: str) -> dict[str, Any] | None:
+    return ((state.get("pending_retries_by_agent") or {}).get(agent_name) or {}).get(event_id)
+
+
+def should_retry_now(state: dict[str, Any], agent_name: str, event_id: str, now: float | None = None) -> bool:
+    entry = retry_entry(state, agent_name, event_id)
+    if not entry:
+        return True
+    return float(entry.get("next_retry_at") or 0) <= (time.time() if now is None else now)
+
+
+def record_transient_failure(state: dict[str, Any], agent_name: str, event: dict[str, Any], error: str, backoff_seconds: float) -> int:
+    event_id = event["id"]
+    by_agent = state.setdefault("pending_retries_by_agent", {}).setdefault(agent_name, {})
+    entry = by_agent.get(event_id) or {"attempts": 0}
+    attempts = int(entry.get("attempts") or 0) + 1
+    entry.update({
+        "attempts": attempts,
+        "event": event,
+        "last_error": error[:1000],
+        "next_retry_at": time.time() + max(1.0, backoff_seconds) * attempts,
+    })
+    by_agent[event_id] = entry
+    return attempts
+
+
+def clear_retry(state: dict[str, Any], agent_name: str, event_id: str) -> None:
+    by_agent = (state.get("pending_retries_by_agent") or {}).get(agent_name)
+    if isinstance(by_agent, dict):
+        by_agent.pop(event_id, None)
+
+
+def due_retry_events(state: dict[str, Any], bindings: list[AgentBinding]) -> list[dict[str, Any]]:
+    now = time.time()
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    pending = state.get("pending_retries_by_agent") or {}
+    for binding in bindings:
+        for event_id, entry in (pending.get(binding.agent_name) or {}).items():
+            event = entry.get("event")
+            if event_id in seen or not isinstance(event, dict):
+                continue
+            if float(entry.get("next_retry_at") or 0) <= now:
+                events.append(event)
+                seen.add(event_id)
+    return events
 
 
 def migrate_legacy_state(state: dict[str, Any], bindings: list[AgentBinding]) -> None:
@@ -390,6 +463,21 @@ def migrate_legacy_state(state: dict[str, Any], bindings: list[AgentBinding]) ->
         for binding in bindings:
             if binding.agent_name not in by_agent:
                 by_agent[binding.agent_name] = sorted(set(str(x) for x in legacy))[-2000:]
+
+    # Runtime sessions used to be keyed only by agent_name. New adapters key by
+    # network/channel/agent so adding the same agent to another room creates a
+    # fresh local runtime conversation instead of inheriting stale context.
+    for runtime, runtime_sessions in list((state.get("runtime_sessions") or {}).items()):
+        if not isinstance(runtime_sessions, dict):
+            continue
+        for binding in bindings:
+            runtime_name = binding.runtime or "openclaw"
+            if runtime != runtime_name:
+                continue
+            value = runtime_sessions.get(binding.agent_name)
+            if isinstance(value, str):
+                runtime_sessions.pop(binding.agent_name, None)
+                state.setdefault("legacy_runtime_sessions_by_agent", {}).setdefault(runtime, {})[binding.agent_name] = value
 
 
 def maybe_heartbeat(args: argparse.Namespace, state: dict[str, Any], bindings: list[AgentBinding]) -> None:
@@ -424,6 +512,8 @@ def main() -> int:
     ap.add_argument("--run-once", action="store_true")
     ap.add_argument("--baseline-only", action="store_true")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--retry-backoff-seconds", type=float, default=30.0, help="Base backoff for retryable handoff failures.")
+    ap.add_argument("--max-transient-attempts", type=int, default=3, help="Promote retryable failures to failed_terminal after this many attempts.")
     args = ap.parse_args()
     if not args.token:
         print("AGENT_BRIDGE_TOKEN/--token is required", file=sys.stderr)
@@ -438,7 +528,9 @@ def main() -> int:
         migrate_legacy_state(state, bindings)
         maybe_heartbeat(args, state, bindings)
         data = poll_events(args.base, args.network, args.channel, args.token, cursor)
-        events = data.get("events", [])
+        polled_events = data.get("events", [])
+        retry_events = due_retry_events(state, bindings)
+        events = retry_events + [e for e in polled_events if e.get("id") not in {r.get("id") for r in retry_events}]
         if args.baseline_only:
             by_agent = state.setdefault("processed_event_ids_by_agent", {})
             for binding in bindings:
@@ -465,27 +557,32 @@ def main() -> int:
             continue
 
         for event in events:
-            if event.get("id"):
+            is_retried_event = any(event.get("id") == r.get("id") for r in retry_events)
+            if event.get("id") and not is_retried_event:
                 cursor = event["id"]
                 state.setdefault("cursors", {})[cursor_key(args.network, args.channel)] = cursor
             for binding in bindings:
                 event_id = event["id"]
                 if event_id in processed_set(state, binding.agent_name) or not should_handle(event, binding):
                     continue
+                if not should_retry_now(state, binding.agent_name, event_id):
+                    continue
                 try:
                     handle_event(args, state, binding, event)
                     mark_processed(state, binding.agent_name, event_id)
                     save_state(args.state, state)
                 except Exception as exc:
+                    attempts = record_transient_failure(state, binding.agent_name, event, str(exc), args.retry_backoff_seconds)
+                    terminal = attempts >= args.max_transient_attempts
+                    status = "failed_terminal" if terminal else "failed_transient"
+                    detail = f"attempts={attempts}; error={str(exc)}"
                     try:
-                        post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "failed", str(exc))
+                        post_ack(args.base, args.network, args.token, event_id, binding.agent_name, status, detail)
                     finally:
-                        # Terminal failed ack means this event has been handled
-                        # from the bridge contract perspective. Future explicit
-                        # replays can clear state if an operator wants retry.
-                        mark_processed(state, binding.agent_name, event_id)
+                        if terminal:
+                            mark_processed(state, binding.agent_name, event_id)
                         save_state(args.state, state)
-                        print(json.dumps({"agent": binding.agent_name, "failed": event_id, "error": str(exc)}), file=sys.stderr, flush=True)
+                        print(json.dumps({"agent": binding.agent_name, status: event_id, "attempts": attempts, "error": str(exc)}), file=sys.stderr, flush=True)
         save_state(args.state, state)
         if args.run_once:
             return 0
