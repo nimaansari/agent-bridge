@@ -16,7 +16,7 @@ Expects context.extra to contain:
 import logging
 import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import select
 
@@ -482,15 +482,35 @@ async def _handle_channel_leave(event: Event, ctx: PipelineContext) -> Optional[
     return event
 
 
-def _extract_mentions(content: str, known_agents: List[str]) -> List[str]:
-    """Parse @agent-name mentions from message text, validated against known agents."""
-    if not content or not known_agents:
+def _agent_alias_map(members) -> Dict[str, str]:
+    """Return lowercase aliases/display-names → canonical agent_name."""
+    aliases: Dict[str, str] = {}
+    for member in members or []:
+        agent_name = getattr(member, "agent_name", None)
+        if not agent_name:
+            continue
+        aliases[agent_name.lower()] = agent_name
+        display_name = getattr(member, "display_name", None)
+        if display_name:
+            aliases[display_name.lower()] = agent_name
+    return aliases
+
+
+def _extract_mentions(content: str, agent_aliases: Dict[str, str]) -> List[str]:
+    """Parse @agent-name mentions from message text, validated against joined agents.
+
+    Agent ids may include dots (e.g. ``mr.robot``), so the mention parser
+    deliberately accepts ``.`` as well as word chars and hyphens.
+    """
+    if not content or not agent_aliases:
         return []
-    # Match @word patterns (agent names are alphanumeric + hyphens)
-    raw_mentions = re.findall(r"@([\w-]+)", content)
-    # Only return mentions that match actual workspace members
-    known_set = set(known_agents)
-    return [m for m in raw_mentions if m in known_set]
+    raw_mentions = re.findall(r"@([\w.-]+)", content)
+    targets: List[str] = []
+    for mention in raw_mentions:
+        target = agent_aliases.get(mention.lower())
+        if target and target not in targets:
+            targets.append(target)
+    return targets
 
 
 def _extract_leading_mention(content: str, known_agents: List[str]) -> Optional[str]:
@@ -503,15 +523,17 @@ def _extract_leading_mention(content: str, known_agents: List[str]) -> Optional[
     return None
 
 
-def _extract_direct_address(content: str, known_agents: List[str]) -> Optional[str]:
-    """Return agent if message begins with `Name, ...` or `Name: ...`.
+def _extract_direct_address(content: str, agent_aliases: Dict[str, str]) -> Optional[str]:
+    """Return agent if message begins by addressing their name.
 
-    Chat rooms should not require @mentions for obvious turn-taking.
+    Chat sessions should not require @mentions for obvious turn-taking, so
+    support forms like `Amin, ...`, `Amin: ...`, and `Amin are you here?`.
     """
-    if not content or not known_agents:
+    if not content or not agent_aliases:
         return None
-    for agent_name in known_agents:
-        if re.match(rf"^\s*{re.escape(agent_name)}\s*[:,\-—]", content, re.I):
+    # Prefer longer aliases first so `mr.robot` wins before `mr` if both exist.
+    for alias, agent_name in sorted(agent_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if re.match(rf"^\s*{re.escape(alias)}(?:\s*[:,\-—]|\s+)", content, re.I):
             return agent_name
     return None
 
@@ -522,16 +544,18 @@ def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
     Priority: explicit @mentions → master (for human/member msgs) → all participants.
     """
     if mentions:
-        return [mentions[0]]
-    if channel.master_agent:
+        return mentions
+    participants = [p.agent_name for p in (channel.participants or [])]
+    if channel.master_agent and channel.master_agent in participants:
         if event.source.startswith("openagents:"):
             sender = event.source[len("openagents:"):]
             # Master's own messages: no self-trigger
             if sender == channel.master_agent:
                 return []
         return [channel.master_agent]
-    # No master — target the first participant
-    participants = [p.agent_name for p in (channel.participants or [])]
+    # No valid master — target the first actual joined participant. This avoids
+    # stale defaults (for example old `openclaw-main`) that are no longer in the
+    # session membership.
     return [participants[0]] if participants else []
 
 
@@ -925,19 +949,6 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     if message_type in ("thinking", "status", "todos"):
         return event
 
-    # Parse @mentions from message content (used for human message routing)
-    known_agents = [
-        m.agent_name for m in db.execute(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == workspace.id,
-            )
-        ).scalars().all()
-    ]
-    mentions = _extract_mentions(content, known_agents)
-    direct_address = _extract_direct_address(content, known_agents)
-    if direct_address and direct_address not in mentions:
-        mentions.insert(0, direct_address)
-
     # Resolve channel (needed for both agent and human message routing)
     channel = None
     if event.target.startswith("channel/"):
@@ -960,7 +971,26 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
     if not channel:
         return event
 
-    if event.source.startswith("human:") and _looks_like_group_chat_request(content):
+    # Parse direct agent addressing against the actual joined participants in
+    # this channel, not stale workspace defaults. This is the key room/session
+    # behavior: if Amin joined as `Amin`, messages like `Amin are you here?`
+    # must target Amin, never an old master such as `openclaw-main`.
+    participant_names = [p.agent_name for p in (channel.participants or []) if p.agent_name]
+    participant_members = db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.agent_name.in_(participant_names),
+        )
+    ).scalars().all() if participant_names else []
+    agent_aliases = _agent_alias_map(participant_members)
+    mentions = _extract_mentions(content, agent_aliases)
+    direct_address = _extract_direct_address(content, agent_aliases)
+    if direct_address and direct_address not in mentions:
+        mentions.insert(0, direct_address)
+
+    if event.source.startswith("human:") and mentions:
+        targets = mentions
+    elif event.source.startswith("human:") and _looks_like_group_chat_request(content):
         targets = _all_channel_agents(channel)
     # ── Multi-agent channel: use LLM/router unless human asked the group ──
     elif len(channel.participants or []) >= 2:

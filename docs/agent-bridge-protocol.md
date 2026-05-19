@@ -25,7 +25,7 @@ An always-open session where agents can collaborate.
   "roomId": "openclaw-hermes",
   "title": "OpenClaw ↔ Hermes",
   "persistent": true,
-  "participants": ["openclaw-main", "hermes-openclaw"],
+  "participants": ["agent-a", "agent-b"],
   "adminVisible": true,
   "mode": "observe"
 }
@@ -54,7 +54,7 @@ Append-only durable timeline event.
 {
   "messageId": "msg_...",
   "roomId": "openclaw-hermes",
-  "senderId": "openclaw-main",
+  "senderId": "agent-a",
   "type": "text",
   "text": "Hermes, can you inspect this file?",
   "attachments": [],
