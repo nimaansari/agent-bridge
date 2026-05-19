@@ -163,6 +163,12 @@ def terminal_for_agent(event: dict[str, Any], agent_name: str) -> bool:
     return status in TERMINAL_ACKS
 
 
+def nonterminal_handoff_for_agent(event: dict[str, Any], agent_name: str) -> bool:
+    responses = (event.get("metadata") or {}).get("handoff_responses") or {}
+    status = (responses.get(agent_name) or {}).get("status")
+    return bool(status and status not in TERMINAL_ACKS)
+
+
 def should_handle(event: dict[str, Any], binding: AgentBinding) -> bool:
     if not binding.enabled:
         return False
@@ -648,6 +654,7 @@ def main() -> int:
     ap.add_argument("--retry-backoff-seconds", type=float, default=30.0, help="Base backoff for retryable handoff failures.")
     ap.add_argument("--max-transient-attempts", type=int, default=3, help="Stop retrying and mark processed after this many failed attempts.")
     ap.add_argument("--raw-room-poll", action="store_true", help="Legacy mode: poll the raw room transcript instead of the per-agent inbox.")
+    ap.add_argument("--reconcile-limit", type=int, default=20, help="Also scan the current inbox tail for non-terminal handoffs that may have been skipped by cursor advancement.")
     args = ap.parse_args()
     if not args.token:
         print("AGENT_BRIDGE_TOKEN/--token is required", file=sys.stderr)
@@ -677,6 +684,28 @@ def main() -> int:
                     event = dict(event)
                     event["__inbox_agent"] = binding.agent_name
                     polled_events.append(event)
+                if args.reconcile_limit > 0:
+                    # Cursor advancement must not strand an already-acked
+                    # non-terminal handoff forever. This tail scan is a repair
+                    # lane: it does not move cursors, and it only reconsiders
+                    # events whose durable handoff state is still non-terminal
+                    # for this agent (for example `processing`).
+                    reconcile = poll_agent_inbox(
+                        args.base,
+                        args.network,
+                        args.channel,
+                        args.token,
+                        binding.agent_name,
+                        None,
+                        args.reconcile_limit,
+                    )
+                    for event in reconcile.get("events", []):
+                        if not nonterminal_handoff_for_agent(event, binding.agent_name):
+                            continue
+                        event = dict(event)
+                        event["__inbox_agent"] = binding.agent_name
+                        event["__reconcile"] = True
+                        polled_events.append(event)
             save_state(args.state, state)
         events = retry_events + [e for e in polled_events if e.get("id") not in {r.get("id") for r in retry_events}]
         if args.baseline_only:
@@ -709,7 +738,7 @@ def main() -> int:
 
         for event in events:
             is_retried_event = any(event.get("id") == r.get("id") for r in retry_events)
-            if event.get("id") and not is_retried_event:
+            if event.get("id") and not is_retried_event and not event.get("__reconcile"):
                 cursor = event["id"]
                 state.setdefault("cursors", {})[cursor_key(args.network, args.channel)] = cursor
             for binding in bindings:
@@ -717,7 +746,8 @@ def main() -> int:
                 inbox_agent = event.get("__inbox_agent")
                 if inbox_agent and inbox_agent != binding.agent_name:
                     continue
-                if event_id in processed_set(state, binding.agent_name) or not should_handle(event, binding):
+                already_processed = event_id in processed_set(state, binding.agent_name)
+                if (already_processed and not nonterminal_handoff_for_agent(event, binding.agent_name)) or not should_handle(event, binding):
                     continue
                 if not should_retry_now(state, binding.agent_name, event_id):
                     continue
