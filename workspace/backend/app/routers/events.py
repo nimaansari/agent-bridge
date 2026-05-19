@@ -984,14 +984,14 @@ async def poll_agent_inbox(
             query.order_by(EventRecord.timestamp.desc(), EventRecord.id.desc()).limit(candidate_limit)
         ).scalars().all()))
     all_actionable = [row for row in candidates if _is_actionable_for_agent(row, agent_name)]
-    actionable = all_actionable[:limit]
-    newest_id = (actionable[-1].id if len(all_actionable) > limit else (candidates[-1].id if candidates else after))
+    actionable = (all_actionable[:limit] if after else all_actionable[-limit:])
+    newest_id = (actionable[-1].id if after and len(all_actionable) > limit else (candidates[-1].id if candidates else after))
     return success_response({
         "workspace_id": str(workspace.id),
         "channel": channel,
         "agent_name": agent_name,
         "events": [_event_dict(row) for row in actionable],
-        "has_more": len(all_actionable) > limit,
+        "has_more": bool(after and len(all_actionable) > limit),
         # Cursor advances over the inspected candidate window, not just
         # returned actionable events. That prevents adapters from rescanning
         # the same unrelated room chatter forever.
