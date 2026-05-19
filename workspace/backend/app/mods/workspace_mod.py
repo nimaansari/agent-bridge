@@ -914,6 +914,41 @@ def _reply_to_id(value) -> Optional[str]:
     return None
 
 
+def _infer_agent_reply_to(event: Event, db, workspace, channel) -> Optional[str]:
+    """Find the latest session event this agent is plausibly answering.
+
+    New adapters should send reply_to explicitly. For legacy/current adapters
+    that do not yet know about Agent Bridge's anchored-reply rule, infer the
+    anchor from the latest channel event that targeted this agent (or, as a
+    final fallback, the latest non-self event). This keeps the guarantee that
+    persisted agent chat messages are replies without breaking live agents.
+    """
+    from app.models import EventRecord
+
+    sender = event.source[len("openagents:"):] if event.source.startswith("openagents:") else None
+    target = f"channel/{channel.name}"
+    rows = db.execute(
+        select(EventRecord)
+        .where(EventRecord.network_id == workspace.id)
+        .where(EventRecord.target == target)
+        .where(EventRecord.id != getattr(event, "id", None))
+        .order_by(EventRecord.timestamp.desc(), EventRecord.id.desc())
+        .limit(50)
+    ).scalars().all()
+
+    if sender:
+        for row in rows:
+            metadata = row.metadata_ or {}
+            targets = metadata.get("target_agents") or []
+            if sender in targets and row.source != event.source:
+                return row.id
+
+    for row in rows:
+        if row.source != event.source and row.type.startswith("workspace."):
+            return row.id
+    return None
+
+
 def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
     """Validate and normalize reply metadata for session messages.
 
@@ -926,6 +961,8 @@ def _normalize_reply_to(event: Event, db, workspace, channel) -> dict:
     payload = event.payload or {}
     reply_id = _reply_to_id(payload.get("reply_to")) or _reply_to_id(payload.get("replyTo")) \
         or _reply_to_id((event.metadata or {}).get("reply_to")) or _reply_to_id((event.metadata or {}).get("replyTo"))
+    if not reply_id:
+        reply_id = _infer_agent_reply_to(event, db, workspace, channel)
     if not reply_id:
         raise EventRejected("workspace_mod", "reply_required: agent messages must include reply_to")
 

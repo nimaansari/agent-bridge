@@ -108,19 +108,21 @@ class TestSendEvent:
         data = resp.json()["data"]
         assert data["metadata"]["custom_key"] == "custom_value"
 
-    def test_agent_chat_requires_reply_to(self, client, workspace):
-        """Agent final/chat messages must be anchored to a session message."""
+    def test_agent_chat_without_reply_to_is_auto_anchored(self, client, workspace):
+        """Legacy agent chat is auto-anchored to the message that targeted it."""
         channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Please answer this")
         resp = client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "openagents:agent-alpha",
             "target": f"channel/{channel_name}",
-            "payload": {"content": "floating answer", "message_type": "chat"},
+            "payload": {"content": "legacy answer", "message_type": "chat"},
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
 
-        assert resp.status_code == 400
-        assert "reply_required" in resp.json()["message"]
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["reply_to"] == anchor_id
 
     def test_agent_chat_reply_to_is_normalized(self, client, workspace):
         """Plain reply_to ids become ClawDeck-style quote objects in payload."""
