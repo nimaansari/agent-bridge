@@ -49,6 +49,13 @@ type ChatMessage = {
   timestamp: number;
   attachments: Attachment[];
   replyTo: ReplyTo | null;
+  acks: MessageAck[];
+};
+
+type MessageAck = {
+  agentName: string;
+  status: string;
+  timestamp: number;
 };
 
 type ReplyTo = {
@@ -128,7 +135,34 @@ function eventToMessage(event: EventRecord): ChatMessage {
     timestamp: event.timestamp,
     attachments,
     replyTo,
+    acks: [],
   };
+}
+
+function eventsToMessages(events: EventRecord[]): ChatMessage[] {
+  const ackMap = new Map<string, MessageAck[]>();
+  for (const event of events) {
+    if (event.type !== 'workspace.message.ack') continue;
+    const payload = event.payload || {};
+    const messageId = String(payload.message_id || '');
+    const agentName = String(payload.agent_name || sourceName(event.source));
+    const status = String(payload.status || 'seen');
+    if (!messageId) continue;
+    const list = ackMap.get(messageId) || [];
+    const existing = list.find((ack) => ack.agentName === agentName);
+    if (existing) {
+      existing.status = status;
+      existing.timestamp = event.timestamp;
+    } else {
+      list.push({ agentName, status, timestamp: event.timestamp });
+    }
+    ackMap.set(messageId, list);
+  }
+  return events
+    .filter((event) => event.type !== 'workspace.message.ack')
+    .map(eventToMessage)
+    .map((message) => ({ ...message, acks: ackMap.get(message.id) || [] }))
+    .filter((message) => message.content || message.attachments.length);
 }
 
 function fileSize(bytes: number) {
@@ -145,6 +179,14 @@ function fileSize(bytes: number) {
 
 function timeText(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function ackLabel(status: string) {
+  if (status === 'processing') return 'processing';
+  if (status === 'replied') return 'replied';
+  if (status === 'failed') return 'failed';
+  if (status === 'seen') return 'seen';
+  return 'delivered';
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -260,7 +302,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
       if (firstChannel) {
         const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace&sort=asc&limit=200`);
-        setMessages((events.events || []).map(eventToMessage).filter((m) => m.content || m.attachments.length));
+        setMessages(eventsToMessages(events.events || []));
       } else {
         setMessages([]);
       }
@@ -358,7 +400,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     setDraft('');
     const replyTo = replyDraft;
     setReplyDraft(null);
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo };
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [] };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
@@ -582,6 +624,15 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                               <span className="text-xs text-slate-500">{fileSize(file.size)}</span>
                               <Download className="size-4 shrink-0 text-slate-500" />
                             </a>
+                          ))}
+                        </div>
+                      )}
+                      {message.acks.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {message.acks.map((ack) => (
+                            <span key={`${message.id}-${ack.agentName}`} className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-400">
+                              {ack.agentName}: {ackLabel(ack.status)}
+                            </span>
                           ))}
                         </div>
                       )}

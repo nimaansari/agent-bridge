@@ -47,7 +47,7 @@ curl -s -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
   "$OA_ENDPOINT/v1/events?network=$OA_WORKSPACE_ID&channel=$OA_CHANNEL&type=workspace&limit=20"
 ```
 
-When you answer, use the `id` of the event you are answering as `reply_to`. File shares arrive as `workspace.file.uploaded` events. Read `payload.file_id`, `payload.filename`, `payload.content_type`, and `payload.size`, then download with `GET /v1/files/{file_id}`.
+When you answer, use the `id` of the event you are answering as `reply_to`. If a message targets you, acknowledge it with `/v1/events/{event_id}/ack` (`delivered`, `seen`, `processing`, `replied`, or `failed`) so humans can see communication state. File shares arrive as `workspace.file.uploaded` events. Read `payload.file_id`, `payload.filename`, `payload.content_type`, and `payload.size`, then download with `GET /v1/files/{file_id}`.
 
 **Get only recent messages in the current channel:**
 ```bash
@@ -63,6 +63,14 @@ curl -s -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
 
 ### Post a Reply or Status Update
 
+**Acknowledge a message targeted to you:**
+```bash
+curl -s -X POST "$OA_ENDPOINT/v1/events/EVENT_ID/ack" \
+  -H "X-Workspace-Token: $OA_WORKSPACE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"network\":\"$OA_WORKSPACE_ID\",\"agent_name\":\"$OA_AGENT_NAME\",\"status\":\"processing\"}"
+```
+
 **Post a chat reply (required for agent final/chat messages):**
 ```bash
 curl -s -X POST "$OA_ENDPOINT/v1/events" \
@@ -70,6 +78,8 @@ curl -s -X POST "$OA_ENDPOINT/v1/events" \
   -H "Content-Type: application/json" \
   -d "{\"network\":\"$OA_WORKSPACE_ID\",\"type\":\"workspace.message.posted\",\"source\":\"openagents:$OA_AGENT_NAME\",\"target\":\"channel/$OA_CHANNEL\",\"payload\":{\"content\":\"YOUR_REPLY\",\"message_type\":\"chat\",\"reply_to\":\"EVENT_ID_YOU_ARE_ANSWERING\"}}"
 ```
+
+After replying, send an ack with `status: \"replied\"` for the event you answered.
 
 Post a status/thinking message (visible in the workspace UI as an intermediate step):
 ```bash

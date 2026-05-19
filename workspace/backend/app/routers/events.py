@@ -43,6 +43,14 @@ class SendEventRequest(BaseModel):
     network: Optional[str] = None   # workspace ID or slug
 
 
+class AckEventRequest(BaseModel):
+    network: str
+    agent_name: str
+    status: str  # delivered | seen | processing | replied | failed
+    detail: Optional[str] = None
+    source: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # POST /v1/events — send an event through the pipeline
 # ---------------------------------------------------------------------------
@@ -145,6 +153,95 @@ async def send_event(
         },
     )
 
+    return success_response({
+        "id": result.id,
+        "type": result.type,
+        "source": result.source,
+        "target": result.target,
+        "timestamp": result.timestamp,
+        "metadata": result.metadata,
+    })
+
+
+@router.post("/events/{event_id}/ack")
+async def ack_event(
+    event_id: str,
+    body: AckEventRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    x_workspace_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Record delivery/read/processing state for a session message.
+
+    This makes agent communication observable: clients can distinguish
+    "message is stored" from "target agent saw it" and "target agent is
+    processing it". Ack events are ordinary persisted events, but they are
+    marked no-response so they never wake agents into loops.
+    """
+    workspace = db.execute(
+        select(Workspace).where(_workspace_filter(body.network))
+    ).scalar_one_or_none()
+    if not workspace:
+        return json_response(ResponseCode.NOT_FOUND, "Network not found")
+    if not _verify_workspace_access(workspace, x_workspace_token, authorization):
+        return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == event_id,
+        )
+    ).scalar_one_or_none()
+    if not original:
+        return json_response(ResponseCode.NOT_FOUND, "Event not found")
+
+    allowed = {"delivered", "seen", "processing", "replied", "failed"}
+    if body.status not in allowed:
+        return json_response(ResponseCode.BAD_REQUEST, f"Invalid ack status: {body.status}")
+
+    source = body.source or f"openagents:{body.agent_name}"
+    event = Event(
+        type="workspace.message.ack",
+        source=source,
+        target=original.target,
+        payload={
+            "message_id": event_id,
+            "agent_name": body.agent_name,
+            "status": body.status,
+            **({"detail": body.detail} if body.detail else {}),
+        },
+        metadata={"reply_to": event_id, "target_agents": ["__no_response__"]},
+        visibility="channel",
+        network=str(workspace.id),
+    )
+    context = PipelineContext(
+        network_id=str(workspace.id),
+        agent_address=source,
+        db=db,
+        workspace=workspace,
+        token=x_workspace_token,
+        bearer_token=_extract_bearer(authorization),
+    )
+    try:
+        result = await pipeline.process(event, context)
+    except EventRejected as exc:
+        return json_response(ResponseCode.FORBIDDEN, exc.reason or "rejected")
+    db.commit()
+
+    from app.services.push import fanout_for_event
+    background_tasks.add_task(
+        fanout_for_event,
+        str(workspace.id),
+        {
+            "id": result.id,
+            "type": result.type,
+            "source": result.source,
+            "target": result.target,
+            "payload": result.payload,
+            "timestamp": result.timestamp,
+        },
+    )
     return success_response({
         "id": result.id,
         "type": result.type,
