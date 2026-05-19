@@ -49,9 +49,14 @@ class WorkspaceMod(TransformMod):
 # ---------------------------------------------------------------------------
 
 async def _handle_agent_join(event: Event, ctx: PipelineContext) -> Optional[Event]:
-    """network.agent.join → upsert WorkspaceMember, set online, rotate session."""
+    """network.agent.join → upsert WorkspaceMember, set online, rotate session.
+
+    Agent Bridge rooms are intentionally simple chat rooms: when a new
+    agent joins the room, it should be able to see and talk in the active
+    room chats without the human manually adding it to each channel.
+    """
     import uuid as _uuid
-    from app.models import WorkspaceMember
+    from app.models import Channel, ChannelMember, WorkspaceMember
 
     db = ctx.extra["db"]
     workspace = ctx.extra["workspace"]
@@ -112,6 +117,28 @@ async def _handle_agent_join(event: Event, ctx: PipelineContext) -> Optional[Eve
         db.add(member)
 
     workspace.last_activity_at = now
+    db.flush()
+
+    # Simple-room behavior: every joined agent can participate in every
+    # active non-routine channel. This keeps the room mental model simple:
+    # join the room → read/send in the room chatbox.
+    active_channels = db.execute(
+        select(Channel).where(
+            Channel.workspace_id == workspace.id,
+            Channel.status == "active",
+        )
+    ).scalars().all()
+    for channel in active_channels:
+        if channel.name.startswith("routines:"):
+            continue
+        already_in_channel = db.execute(
+            select(ChannelMember).where(
+                ChannelMember.channel_id == channel.id,
+                ChannelMember.agent_name == agent_name,
+            )
+        ).scalar_one_or_none()
+        if not already_in_channel:
+            db.add(ChannelMember(channel_id=channel.id, agent_name=agent_name))
     db.flush()
 
     # Enrich event metadata with resolved info + session_id so the
@@ -279,15 +306,16 @@ async def _handle_ping(event: Event, ctx: PipelineContext) -> Optional[Event]:
 
 async def _handle_channel_create(event: Event, ctx: PipelineContext) -> Optional[Event]:
     """network.channel.create → create Channel + initial ChannelMember rows."""
-    from app.models import Channel, ChannelMember
+    from app.models import Channel, ChannelMember, WorkspaceMember
 
     db = ctx.extra["db"]
     workspace = ctx.extra["workspace"]
     payload = event.payload or {}
 
+    channel_name = payload.get("name", f"channel-{event.id[:8]}")
     channel = Channel(
         workspace_id=workspace.id,
-        name=payload.get("name", f"channel-{event.id[:8]}"),
+        name=channel_name,
         title=payload.get("title"),
         created_by=event.source,
         master_agent=payload.get("master"),
@@ -297,8 +325,18 @@ async def _handle_channel_create(event: Event, ctx: PipelineContext) -> Optional
     db.add(channel)
     db.flush()  # get channel.id
 
-    # Add initial participants
-    participants = payload.get("participants", [])
+    # Add initial participants. In simple Agent Bridge rooms, new chat
+    # channels include all current room agents so every side can see/read
+    # and send in the same chatbox. Routine channels stay isolated.
+    participants = set(payload.get("participants", []))
+    if not channel_name.startswith("routines:"):
+        room_agents = db.execute(
+            select(WorkspaceMember.agent_name).where(
+                WorkspaceMember.workspace_id == workspace.id,
+            )
+        ).scalars().all()
+        participants.update(room_agents)
+
     for agent_name in participants:
         db.add(ChannelMember(channel_id=channel.id, agent_name=agent_name))
 
