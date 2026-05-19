@@ -202,6 +202,25 @@ async def ack_event(
     if body.status not in allowed:
         return json_response(ResponseCode.BAD_REQUEST, f"Invalid ack status: {body.status}")
 
+    original_metadata = dict(original.metadata_ or {})
+    responses = dict(original_metadata.get("handoff_responses") or {})
+    responses[body.agent_name] = {
+        "status": body.status,
+        **({"detail": body.detail} if body.detail else {}),
+    }
+    original_metadata["handoff_responses"] = responses
+
+    required = original_metadata.get("required_responses") or []
+    if original_metadata.get("response_required") and required:
+        terminal = {"replied", "failed"}
+        if all((responses.get(agent) or {}).get("status") in terminal for agent in required):
+            original_metadata["handoff_state"] = "complete"
+        elif any((responses.get(agent) or {}).get("status") == "processing" for agent in required):
+            original_metadata["handoff_state"] = "processing"
+        else:
+            original_metadata.setdefault("handoff_state", "pending")
+    original.metadata_ = original_metadata
+
     source = body.source or f"openagents:{body.agent_name}"
     event = Event(
         type="workspace.message.ack",

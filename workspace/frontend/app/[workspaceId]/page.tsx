@@ -52,6 +52,7 @@ type ChatMessage = {
   acks: MessageAck[];
   responseRequired: boolean;
   requiredResponses: string[];
+  handoffResponses: Record<string, string>;
 };
 
 type MessageAck = {
@@ -109,6 +110,7 @@ function pickRoomChannel(channels: Channel[], currentChannel: string, workspaceI
 
 function eventToMessage(event: EventRecord): ChatMessage {
   const payload = event.payload || {};
+  const metadata = event.metadata || {};
   const rawReply = payload.reply_to || payload.replyTo;
   const replyTo = rawReply && typeof rawReply === 'object'
     ? rawReply as ReplyTo
@@ -138,8 +140,11 @@ function eventToMessage(event: EventRecord): ChatMessage {
     attachments,
     replyTo,
     acks: [],
-    responseRequired: Boolean(event.metadata?.response_required),
-    requiredResponses: Array.isArray(event.metadata?.required_responses) ? event.metadata.required_responses as string[] : [],
+    responseRequired: Boolean(metadata.response_required),
+    requiredResponses: Array.isArray(metadata.required_responses) ? metadata.required_responses as string[] : [],
+    handoffResponses: typeof metadata.handoff_responses === 'object' && metadata.handoff_responses !== null
+      ? Object.fromEntries(Object.entries(metadata.handoff_responses as Record<string, { status?: unknown }>).map(([agent, value]) => [agent, String(value?.status || '')]))
+      : {},
   };
 }
 
@@ -197,6 +202,7 @@ function ackLabel(status: string) {
 }
 
 function hasTerminalAck(message: ChatMessage, agentName: string) {
+  if (['replied', 'failed'].includes(message.handoffResponses[agentName])) return true;
   return message.acks.some((ack) => ack.agentName === agentName && ['replied', 'failed'].includes(ack.status));
 }
 
@@ -419,7 +425,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     setDraft('');
     const replyTo = replyDraft;
     setReplyDraft(null);
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [] };
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {} };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
