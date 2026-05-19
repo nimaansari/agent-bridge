@@ -188,8 +188,23 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     window.localStorage.setItem(`agentBridgeFreeze:${workspaceId}`, String(next));
   };
 
-  const copyToken = async () => {
-    await navigator.clipboard.writeText(token);
+  const agentInviteText = useMemo(() => {
+    const roomName = room?.name || 'this Agent Bridge room';
+    return [
+      `Join my Agent Bridge chat room: ${roomName}`,
+      '',
+      `Room link: ${typeof window !== 'undefined' ? window.location.origin : ''}/${workspaceId}?token=${token}`,
+      `Room token: ${token}`,
+      `Server/API: ${API_URL}`,
+      '',
+      'Use the repo/path I give you, connect to this room, then send one short hello message in the chat.',
+      'Use your real agent name as your display name.',
+      'Do not change files unless I ask you to.',
+    ].join('\n');
+  }, [room?.name, token, workspaceId]);
+
+  const copyAgentInvite = async () => {
+    await navigator.clipboard.writeText(agentInviteText);
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
@@ -374,31 +389,34 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="w-full max-w-lg rounded-3xl border border-white/10 bg-slate-950 p-6 shadow-2xl">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">Add another agent</h2>
-                <p className="mt-1 text-sm text-slate-400">Give this prompt/token to the agent you want to join this room.</p>
+                <h2 className="text-xl font-semibold">Add agent</h2>
+                <p className="mt-1 text-sm text-slate-400">Copy one invite. Paste it to the other agent with the repo you want it to use.</p>
               </div>
               <button onClick={() => setConnectOpen(false)} className="rounded-xl p-2 text-slate-400 hover:bg-white/10 hover:text-white"><X className="size-5" /></button>
             </div>
 
             <div className="space-y-3">
-              <button onClick={copyToken} className="flex w-full items-center gap-3 rounded-2xl border border-dashed border-cyan-300/30 bg-cyan-300/10 px-4 py-3 text-left">
-                {copied ? <Check className="size-5 text-emerald-300" /> : <Copy className="size-5 text-cyan-200" />}
-                <div className="min-w-0">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Workspace token</p>
-                  <p className="truncate font-mono text-sm text-cyan-100">{token}</p>
-                </div>
+              <button onClick={copyAgentInvite} className="flex w-full items-center justify-center gap-3 rounded-2xl bg-cyan-300 px-4 py-4 text-base font-semibold text-slate-950 hover:bg-cyan-200">
+                {copied ? <Check className="size-5" /> : <Copy className="size-5" />}
+                {copied ? 'Copied invite' : 'Copy agent invite'}
               </button>
 
-              <div className="rounded-2xl bg-black/35 p-4 font-mono text-xs leading-6 text-slate-300 ring-1 ring-white/10">
-                <p>You are joining an Agent Bridge chat room.</p>
-                <p>Repo: &lt;repo path or URL&gt;</p>
-                <p>Run: openagents</p>
-                <p>Paste token: {token}</p>
-                <p>Use display name: &lt;your real agent name&gt;</p>
-                <p>After joining, introduce yourself and wait for instructions.</p>
+              <div className="rounded-2xl bg-black/35 p-4 text-sm leading-6 text-slate-300 ring-1 ring-white/10">
+                <p className="mb-2 font-semibold text-slate-100">What to do:</p>
+                <ol className="list-decimal space-y-1 pl-5">
+                  <li>Click <span className="text-cyan-100">Copy agent invite</span>.</li>
+                  <li>Paste it to the agent.</li>
+                  <li>Give that agent the repo/path.</li>
+                  <li>The agent joins and says hello here.</li>
+                </ol>
               </div>
 
-              <p className="text-sm text-slate-400">Once the agent connects, it will appear in the agent list. To rename it later, click the pencil beside its name.</p>
+              <details className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-xs text-slate-400">
+                <summary className="cursor-pointer text-sm font-medium text-slate-300">Show token/details</summary>
+                <pre className="mt-3 whitespace-pre-wrap break-words font-mono">{agentInviteText}</pre>
+              </details>
+
+              <p className="text-sm text-slate-400">When the agent connects, it appears in the left agent list. Rename it with the pencil icon if needed.</p>
             </div>
           </div>
         </div>
