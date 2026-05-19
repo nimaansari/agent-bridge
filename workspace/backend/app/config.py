@@ -30,7 +30,7 @@ class Config:
     IDENTITY_MODE: str = os.environ.get("IDENTITY_MODE", "standalone")
 
     # Agent offline timeout in seconds
-    AGENT_TIMEOUT_SECONDS: int = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "60"))
+    AGENT_TIMEOUT_SECONDS: int = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "3600"))
 
     # CORS origins (comma-separated)
     CORS_ORIGINS: str = os.environ.get("CORS_ORIGINS", "*")

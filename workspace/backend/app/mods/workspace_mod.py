@@ -857,6 +857,20 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
             # the router checks session_error and returns an error response.
             return event
 
+        # Message activity is presence activity. Some adapters can miss or
+        # slow down heartbeat polls, but if an agent is actively talking in
+        # the room it should not be shown as offline.
+        member = db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace.id,
+                WorkspaceMember.agent_name == sender,
+            )
+        ).scalar_one_or_none()
+        if member:
+            member.status = "online"
+            member.last_heartbeat = datetime.now(timezone.utc)
+            db.flush()
+
     # "thinking", "status", and "todos" messages are intermediate agent output
     # — they should NOT trigger other agents.
     if message_type in ("thinking", "status", "todos"):
