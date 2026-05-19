@@ -5,6 +5,7 @@ import { X, Copy, Check, Plus, Globe, Folder, Monitor, UserRoundCog } from 'luci
 import { useLayout } from '@/components/layout/layout-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { AgentAvatar } from '@/components/agents/agent-avatar';
+import { agentDisplayName } from '@/lib/agent-labels';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { workspaceApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -97,7 +98,8 @@ export function AgentProfilePanel() {
           <div className="flex items-center gap-3">
             <AgentAvatar name={agent.agentName} size={40} status={agent.status} showStatus />
             <div className="flex-1 min-w-0">
-              <h3 className="text-[15px] font-semibold leading-tight truncate">{agent.agentName}</h3>
+              <h3 className="text-[15px] font-semibold leading-tight truncate">{agentDisplayName(agent)}</h3>
+              <p className="text-[11px] text-muted-foreground truncate">id: {agent.agentName}</p>
               <div className="flex items-center gap-1.5 mt-1">
                 <span className={cn(
                   'inline-flex items-center gap-1 text-[11px] px-1.5 py-px rounded font-medium',

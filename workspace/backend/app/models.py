@@ -99,6 +99,7 @@ class WorkspaceMember(Base):
 
     workspace_id = Column(UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
     agent_name = Column(Text, nullable=False)
+    display_name = Column(Text, nullable=True)        # user-editable label shown in the dashboard
     role = Column(Text, default="member")           # master | member | observer
     agent_type = Column(Text, nullable=True)          # "claude", "openclaw", etc.
     server_host = Column(Text, nullable=True)          # hostname/IP where agent runs

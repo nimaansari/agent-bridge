@@ -358,6 +358,7 @@ async def discover(
                 status = "offline"
         agents.append({
             "address": f"openagents:{m.agent_name}",
+            "display_name": m.display_name,
             "role": m.role,
             "status": status,
             "agent_type": m.agent_type,

@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { memo, useCallback, useMemo, useState } from 'react';
 import type { WorkspaceMessage, WorkspaceAgent } from '@/lib/types';
 import { AgentAvatar } from '@/components/agents/agent-avatar';
+import { agentDisplayName } from '@/lib/agent-labels';
 import { MarkdownContent } from './markdown-content';
 import { workspaceApi } from '@/lib/api';
 import { useLayout } from '@/components/layout/layout-context';
@@ -114,6 +115,7 @@ export const ChatMessage = memo(function ChatMessage({ message, agents = [] }: C
 
   const agentNames = agents.map((a) => a.agentName);
   const agent = agents.find((a) => a.agentName === message.senderName);
+  const senderLabel = agent ? agentDisplayName(agent) : message.senderName;
   const attachments = (message.metadata?.attachments as Attachment[]) || [];
 
   const timestamp = message.createdAt
@@ -141,7 +143,7 @@ export const ChatMessage = memo(function ChatMessage({ message, agents = [] }: C
             ? 'text-blue-500 dark:text-blue-400'
             : 'text-muted-foreground'
         )}>
-          {message.senderName}: {message.content}
+          {senderLabel}: {message.content}
         </span>
       </div>
     );
@@ -180,7 +182,7 @@ export const ChatMessage = memo(function ChatMessage({ message, agents = [] }: C
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2">
             <span className="text-[15px] font-bold text-foreground truncate">
-              {message.senderName}
+              {senderLabel}
             </span>
             {agent && (
               <span className={cn(

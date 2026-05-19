@@ -115,6 +115,7 @@ def _format_workspace(ws: Workspace, members: list, now: datetime) -> dict:
                 status = "offline"
         agents.append({
             "agentName": m.agent_name,
+            "displayName": m.display_name,
             "role": m.role,
             "agentType": m.agent_type,
             "status": status,
@@ -453,6 +454,7 @@ async def remove_member(
 # ---------------------------------------------------------------------------
 
 class MemberUpdateRequest(BaseModel):
+    display_name: Optional[str] = None
     description: Optional[str] = None
     role: Optional[str] = None
 
@@ -487,6 +489,8 @@ async def update_member(
     if not member:
         return json_response(ResponseCode.NOT_FOUND, "Member not found")
 
+    if body.display_name is not None:
+        member.display_name = body.display_name.strip() or None
     if body.description is not None:
         member.description = body.description
     if body.role is not None:
@@ -496,6 +500,7 @@ async def update_member(
 
     return success_response({
         "agentName": member.agent_name,
+        "displayName": member.display_name,
         "description": member.description,
         "role": member.role,
     })

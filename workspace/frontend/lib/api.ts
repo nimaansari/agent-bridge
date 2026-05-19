@@ -101,7 +101,7 @@ class WorkspaceApi {
     });
   }
 
-  async updateMember(agentName: string, updates: { description?: string; role?: string }): Promise<unknown> {
+  async updateMember(agentName: string, updates: { display_name?: string; description?: string; role?: string }): Promise<unknown> {
     return this.request(`/v1/workspaces/${this.workspaceId}/members/${agentName}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
@@ -424,6 +424,7 @@ class WorkspaceApi {
     const discovery = await this.discover();
     return discovery.agents.map((a) => ({
       agentName: a.address.replace(/^openagents:/, ''),
+      displayName: a.display_name || null,
       role: a.role,
       agentType: a.agent_type || null,
       serverHost: a.server_host || null,

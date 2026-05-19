@@ -122,7 +122,7 @@ export function ConnectAgentView() {
               <h3 className="text-sm font-semibold">Run the OpenAgents CLI</h3>
             </div>
             <p className="text-xs text-muted-foreground mb-3 ml-8">
-              Open a terminal and run the graphical setup. It will guide you through connecting an agent to this workspace.
+              Open a terminal on any machine/agent and run the setup. Choose the agent type, paste this workspace token, then give it a real display name like “OpenClaw”, “Hermes”, or “Nima’s Codex”.
             </p>
             <div className="ml-8 space-y-3">
               {/* Command */}
@@ -160,7 +160,11 @@ export function ConnectAgentView() {
                       </div>
                       <div className="flex items-center gap-2">
                         <div className="size-1.5 rounded-full bg-violet-500 shrink-0" />
-                        <span className="text-xs text-foreground">Agent connects and appears here</span>
+                        <span className="text-xs text-foreground">Set a human-readable agent name</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="size-1.5 rounded-full bg-cyan-500 shrink-0" />
+                        <span className="text-xs text-foreground">Agent connects and appears in the sidebar</span>
                       </div>
                     </div>
                   </div>

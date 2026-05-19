@@ -24,6 +24,7 @@ import { useLayout, type ViewMode } from './layout-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { isRecentAgent, timeAgo } from '@/lib/helpers';
 import { AgentAvatar } from '@/components/agents/agent-avatar';
+import { agentDisplayName } from '@/lib/agent-labels';
 import { cn } from '@/lib/utils';
 import { workspaceApi } from '@/lib/api';
 import { Switch } from '@/components/ui/switch';
@@ -156,7 +157,7 @@ export function SidebarContent() {
                   <AgentAvatar name={agent.agentName} size={28} status={agent.status} showStatus />
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="right">{agent.agentName}</TooltipContent>
+              <TooltipContent side="right">{agentDisplayName(agent)}</TooltipContent>
             </Tooltip>
           ))}
         </div>
@@ -235,7 +236,7 @@ export function SidebarContent() {
                 >
                   <AgentAvatar name={agent.agentName} size={20} status={agent.status} showStatus />
                   <span className="text-[13px] font-normal text-foreground group-hover:text-primary truncate text-left">
-                    {agent.agentName}
+                    {agentDisplayName(agent)}
                   </span>
                 </button>
               ))}

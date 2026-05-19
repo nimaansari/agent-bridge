@@ -29,6 +29,7 @@ export function SettingsDialog({ workspace }: SettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(workspace?.name || '');
   const [saving, setSaving] = useState(false);
+  const [displayNames, setDisplayNames] = useState<Record<string, string>>({});
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const { refreshWorkspace } = useWorkspace();
   const { isCopied: urlCopied, copyToClipboard: copyUrl } = useCopyToClipboard();
@@ -37,10 +38,13 @@ export function SettingsDialog({ workspace }: SettingsDialogProps) {
   // Sync descriptions from workspace agents when dialog opens
   useEffect(() => {
     if (open && workspace?.agents) {
+      const names: Record<string, string> = {};
       const descs: Record<string, string> = {};
       for (const agent of workspace.agents) {
+        names[agent.agentName] = agent.displayName || agent.agentName;
         descs[agent.agentName] = agent.description || '';
       }
+      setDisplayNames(names);
       setDescriptions(descs);
     }
   }, [open, workspace?.agents]);
@@ -60,10 +64,15 @@ export function SettingsDialog({ workspace }: SettingsDialogProps) {
 
       // Save agent descriptions
       const updates = workspace.agents.map((agent) => {
+        const newDisplayName = (displayNames[agent.agentName] ?? agent.agentName).trim();
+        const oldDisplayName = agent.displayName || agent.agentName;
         const newDesc = descriptions[agent.agentName] ?? '';
         const oldDesc = agent.description || '';
-        if (newDesc !== oldDesc) {
-          return workspaceApi.updateMember(agent.agentName, { description: newDesc });
+        if (newDesc !== oldDesc || newDisplayName !== oldDisplayName) {
+          return workspaceApi.updateMember(agent.agentName, {
+            display_name: newDisplayName === agent.agentName ? '' : newDisplayName,
+            description: newDesc,
+          });
         }
         return null;
       }).filter(Boolean);
@@ -155,6 +164,8 @@ export function SettingsDialog({ workspace }: SettingsDialogProps) {
                   <AgentDescriptionField
                     key={agent.agentName}
                     agent={agent}
+                    displayName={displayNames[agent.agentName] || agent.displayName || agent.agentName}
+                    onDisplayNameChange={(v) => setDisplayNames((prev) => ({ ...prev, [agent.agentName]: v }))}
                     value={descriptions[agent.agentName] || ''}
                     onChange={(v) => setDescriptions((prev) => ({ ...prev, [agent.agentName]: v }))}
                   />
@@ -180,10 +191,14 @@ export function SettingsDialog({ workspace }: SettingsDialogProps) {
 
 function AgentDescriptionField({
   agent,
+  displayName,
+  onDisplayNameChange,
   value,
   onChange,
 }: {
   agent: WorkspaceAgent;
+  displayName: string;
+  onDisplayNameChange: (v: string) => void;
   value: string;
   onChange: (v: string) => void;
 }) {
@@ -191,11 +206,17 @@ function AgentDescriptionField({
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
         <AgentAvatar name={agent.agentName} size={24} />
-        <span className="text-sm font-medium">{agent.agentName}</span>
+        <span className="text-sm font-medium">{displayName || agent.agentName}</span>
         <span className="text-xs text-muted-foreground">
-          {agent.agentType || 'unknown'} &middot; {agent.status}
+          id: {agent.agentName} &middot; {agent.agentType || 'unknown'} &middot; {agent.status}
         </span>
       </div>
+      <Input
+        className="ml-8 text-sm"
+        placeholder="Display name shown in the dashboard"
+        value={displayName}
+        onChange={(e) => onDisplayNameChange(e.target.value)}
+      />
       {agent.workingDir && (
         <p className="text-xs text-muted-foreground font-mono ml-8">
           {agent.workingDir}
