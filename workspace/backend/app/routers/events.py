@@ -971,9 +971,18 @@ async def poll_agent_inbox(
     # portability across JSON metadata shapes. The candidate window is larger
     # than the returned limit so the inbox remains useful even when the room is
     # busy with unrelated chat.
-    candidates = db.execute(
-        query.order_by(EventRecord.timestamp.asc(), EventRecord.id.asc()).limit(max(limit * 10, 200))
-    ).scalars().all()
+    candidate_limit = max(limit * 10, 200)
+    if after:
+        candidates = db.execute(
+            query.order_by(EventRecord.timestamp.asc(), EventRecord.id.asc()).limit(candidate_limit)
+        ).scalars().all()
+    else:
+        # First attach should inspect the current tail of the session, not the
+        # oldest historical messages. Otherwise long-lived mixed rooms can hide
+        # fresh actionable messages behind years of irrelevant transcript.
+        candidates = list(reversed(db.execute(
+            query.order_by(EventRecord.timestamp.desc(), EventRecord.id.desc()).limit(candidate_limit)
+        ).scalars().all()))
     all_actionable = [row for row in candidates if _is_actionable_for_agent(row, agent_name)]
     actionable = all_actionable[:limit]
     newest_id = (actionable[-1].id if len(all_actionable) > limit else (candidates[-1].id if candidates else after))
