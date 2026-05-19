@@ -987,6 +987,16 @@ def _reject_repeated_agent_chat(event: Event, db, workspace) -> None:
         previous_payload = previous.payload or {}
         if previous_payload.get("message_type", "chat") != "chat":
             continue
+        previous_reply_to = _reply_to_id(previous_payload.get("reply_to")) \
+            or _reply_to_id((previous.metadata_ or {}).get("reply_to"))
+        current_reply_to = _reply_to_id(payload.get("reply_to")) \
+            or _reply_to_id((event.metadata or {}).get("reply_to"))
+        # Repeating the exact same long answer to the exact same source
+        # message is a replay/loop bug. The same text anchored to a different
+        # source message is allowed: short smoke prompts and deterministic
+        # agent reviews can legitimately produce identical final text.
+        if previous_reply_to != current_reply_to:
+            continue
         if _normalize_for_duplicate_check(str(previous_payload.get("content") or "")) == normalized:
             raise EventRejected("workspace_mod", "duplicate_agent_message: repeated agent chat blocked")
 

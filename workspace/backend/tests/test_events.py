@@ -281,6 +281,29 @@ class TestSendEvent:
         assert second.status_code == 400
         assert "duplicate_agent_message" in second.json()["message"]
 
+    def test_repeated_long_agent_chat_allowed_for_different_anchor(self, client, workspace):
+        """Deterministic replies to different prompts should not trip loop guard."""
+        channel_name = workspace["channel"]["name"]
+        first_anchor = _anchor_event_id(client, workspace, channel_name, "first prompt")
+        second_anchor = _anchor_event_id(client, workspace, channel_name, "second prompt")
+        content = "This is a long deterministic agent response that may be repeated when two separate prompts ask for the same summary or confirmation."
+        first = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": content, "reply_to": first_anchor},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert first.status_code == 200
+        second = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": content, "reply_to": second_anchor},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert second.status_code == 200
+
     def test_member_message_without_mentions_routes_to_master(self, client, workspace):
         """Member agent messages without mentions route back to channel master."""
         # Add a member agent

@@ -61,7 +61,7 @@ def test_non_session_channels_attach_at_head_unless_replay_requested():
     assert should_attach_at_head("channel-alpha", replay_existing=True) is False
 
 
-def test_failed_transient_is_not_terminal_for_required_response():
+def test_failed_is_terminal_for_required_response_until_attempt_table_lands():
     event = {
         "id": "evt-1",
         "type": "workspace.message.posted",
@@ -69,22 +69,7 @@ def test_failed_transient_is_not_terminal_for_required_response():
         "payload": {"content": "please answer"},
         "metadata": {
             "required_responses": ["mr.robot"],
-            "handoff_responses": {"mr.robot": {"status": "failed_transient"}},
-        },
-    }
-    assert terminal_for_agent(event, "mr.robot") is False
-    assert should_handle(event, AgentBinding("mr.robot")) is True
-
-
-def test_failed_terminal_is_terminal_for_required_response():
-    event = {
-        "id": "evt-1",
-        "type": "workspace.message.posted",
-        "source": "human:user",
-        "payload": {"content": "please answer"},
-        "metadata": {
-            "required_responses": ["mr.robot"],
-            "handoff_responses": {"mr.robot": {"status": "failed_terminal"}},
+            "handoff_responses": {"mr.robot": {"status": "failed"}},
         },
     }
     assert terminal_for_agent(event, "mr.robot") is True

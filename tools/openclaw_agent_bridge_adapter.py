@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-TERMINAL_ACKS = {"replied", "failed_terminal"}
+TERMINAL_ACKS = {"replied", "failed"}
 DEFAULT_STATE = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_adapter_state.json"
 DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_agents.json"
 
@@ -110,6 +110,16 @@ def post_ack(base: str, network: str, token: str, event_id: str, agent_name: str
     if detail:
         payload["detail"] = detail[:500]
     http_json("POST", f"{base}/v1/events/{event_id}/ack", token, payload)
+
+
+def safe_post_ack(base: str, network: str, token: str, event_id: str, agent_name: str, status: str, detail: str | None = None) -> None:
+    try:
+        post_ack(base, network, token, event_id, agent_name, status, detail)
+    except Exception as exc:
+        # Ack write failures must not crash the adapter. Crashing here leaves
+        # the source message stuck at the previous state (usually processing)
+        # and can create an infinite systemd restart loop.
+        print(json.dumps({"agent": agent_name, "ack_failed": event_id, "status": status, "error": str(exc)}), file=sys.stderr, flush=True)
 
 
 def post_reply(base: str, network: str, channel: str, token: str, agent_name: str, content: str, reply_to: str) -> dict[str, Any]:
@@ -401,15 +411,15 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
 def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: AgentBinding, event: dict[str, Any]) -> None:
     event_id = event["id"]
     session_id = session_id_for(state, args.network, args.channel, binding)
-    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
-    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
-    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
+    safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
+    safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
+    safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
     reply, session_id, recovered = run_runtime_turn_with_recovery(state, args, binding, build_prompt(event, binding))
     reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
     detail = f"reply_event_id={reply_event['id']}; runtime={binding.runtime}; session_id={session_id}"
     if recovered:
         detail += "; recovered=context_overflow_reset"
-    post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
+    safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
     print(json.dumps({"agent": binding.agent_name, "runtime": binding.runtime, "handled": event_id, "reply_event_id": reply_event["id"], "session_id": session_id, "recovered": recovered}), flush=True)
 
 
@@ -530,7 +540,7 @@ def main() -> int:
     ap.add_argument("--baseline-only", action="store_true")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--retry-backoff-seconds", type=float, default=30.0, help="Base backoff for retryable handoff failures.")
-    ap.add_argument("--max-transient-attempts", type=int, default=3, help="Promote retryable failures to failed_terminal after this many attempts.")
+    ap.add_argument("--max-transient-attempts", type=int, default=3, help="Stop retrying and mark processed after this many failed attempts.")
     args = ap.parse_args()
     if not args.token:
         print("AGENT_BRIDGE_TOKEN/--token is required", file=sys.stderr)
@@ -594,10 +604,14 @@ def main() -> int:
                 except Exception as exc:
                     attempts = record_transient_failure(state, binding.agent_name, event, str(exc), args.retry_backoff_seconds)
                     terminal = attempts >= args.max_transient_attempts
-                    status = "failed_terminal" if terminal else "failed_transient"
-                    detail = f"attempts={attempts}; error={str(exc)}"
+                    # Backend currently accepts the public statuses
+                    # delivered/seen/processing/replied/failed. Keep richer
+                    # retry semantics in adapter state/detail until the
+                    # durable attempt table lands.
+                    status = "failed"
+                    detail = f"attempts={attempts}; terminal={terminal}; retryable={not terminal}; error={str(exc)}"
                     try:
-                        post_ack(args.base, args.network, args.token, event_id, binding.agent_name, status, detail)
+                        safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, status, detail)
                     finally:
                         if terminal:
                             mark_processed(state, binding.agent_name, event_id)
