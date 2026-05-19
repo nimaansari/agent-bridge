@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -86,12 +87,14 @@ def discover_channel_agents(base: str, network: str, channel: str, token: str) -
 
 
 def post_heartbeat(base: str, network: str, token: str, binding: AgentBinding, session_id: str) -> None:
-    http_json(
-        "POST",
-        f"{base}/v1/heartbeat",
-        token,
-        {"network": network, "agent_name": binding.agent_name, "session_id": session_id},
-    )
+    payload = {"network": network, "agent_name": binding.agent_name}
+    if os.environ.get("AGENT_BRIDGE_SEND_RUNTIME_SESSION_ID") == "1":
+        # Agent Bridge's member session_id is an enrollment/session-token
+        # concept, not the OpenClaw runtime conversation id. Keep it omitted
+        # by default so adapter heartbeats are accepted for existing joined
+        # agents without revoking themselves.
+        payload["session_id"] = session_id
+    http_json("POST", f"{base}/v1/heartbeat", token, payload)
 
 
 def post_ack(base: str, network: str, token: str, event_id: str, agent_name: str, status: str, detail: str | None = None) -> None:
@@ -198,7 +201,11 @@ def cursor_key(network: str, channel: str) -> str:
 
 
 def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeout: int) -> str:
-    openclaw_bin = os.environ.get("OPENCLAW_BIN", "openclaw")
+    openclaw_bin = (
+        os.environ.get("OPENCLAW_BIN")
+        or shutil.which("openclaw")
+        or "/home/nimapro1381/.npm-global/bin/openclaw"
+    )
     cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
     if binding.openclaw_agent:
         cmd.extend(["--agent", binding.openclaw_agent])
