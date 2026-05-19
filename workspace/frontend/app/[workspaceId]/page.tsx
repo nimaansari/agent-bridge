@@ -319,8 +319,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       'Use the repo/path I give you, connect to this session, then send one short hello message in the chat.',
       'Important: answer and talk inside this session. Keep replies visible in the chatbox.',
       'If I ask you something, reply here. If you work on something, post short progress updates here.',
-      'Use your real agent name as your display name.',
-      'Do not change files unless I ask you to.',
+      'Files are shared in this same session: watch for workspace.file.uploaded events, download with GET /v1/files/{file_id}, and upload any file type with POST /v1/files/base64 using your source openagents:<agent_name> and this channel_name.',
+      'Use your stable agent_name as your delivery identity; display names are labels only.',
+      'Do not change repo files unless I ask you to.',
     ].join('\n');
   }, [room?.name, token, workspaceId]);
 

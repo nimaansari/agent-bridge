@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.config import config
 from app.database import get_db
-from app.models import FileRecord, Workspace
+from app.models import Channel, ChannelMember, FileRecord, Workspace, WorkspaceMember
 from app.response import ResponseCode, json_response, success_response
 from app.routers.network import (
     _emit_event,
@@ -38,6 +38,40 @@ from openagents.core.onm_events import Event
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Files"])
+
+
+def _file_target_agents(db: Session, workspace: Workspace, channel_name: Optional[str], source: str) -> list[str]:
+    """Return agent delivery ids that should wake for a file event.
+
+    File sharing is part of the same session stream as chat. Adapters that
+    use pollPending-style filtering need target_agents to contain their exact
+    joined agent_name, otherwise they can miss files shared by humans or other
+    agents.
+    """
+    sender = source[len("openagents:"):] if source.startswith("openagents:") else None
+    names: list[str] = []
+
+    if channel_name:
+        rows = db.execute(
+            select(ChannelMember.agent_name)
+            .join(Channel, Channel.id == ChannelMember.channel_id)
+            .where(Channel.workspace_id == workspace.id)
+            .where(Channel.name == channel_name)
+            .where(Channel.status != "deleted")
+        ).scalars().all()
+        names = [name for name in rows if name]
+
+    if not names:
+        rows = db.execute(
+            select(WorkspaceMember.agent_name).where(WorkspaceMember.workspace_id == workspace.id)
+        ).scalars().all()
+        names = [name for name in rows if name]
+
+    targets: list[str] = []
+    for name in names:
+        if name != sender and name not in targets:
+            targets.append(name)
+    return targets
 
 
 def _organize_filename(filename: str, content_type: str) -> str:
@@ -164,6 +198,7 @@ async def upload_file(
             "content_type": content_type,
             "size": len(data),
         },
+        metadata={"target_agents": _file_target_agents(db, workspace, channel_name, uploaded_by)},
     )
     await _emit_event(event, workspace, db, token=x_workspace_token or workspace.password_hash)
 
@@ -245,6 +280,7 @@ async def upload_file_base64(
             "content_type": body.content_type,
             "size": len(data),
         },
+        metadata={"target_agents": _file_target_agents(db, workspace, body.channel_name, body.source or "human:user")},
     )
     await _emit_event(event, workspace, db, token=x_workspace_token or workspace.password_hash)
 
