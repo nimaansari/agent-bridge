@@ -69,6 +69,29 @@ class EventRecord(Base):
     )
 
 
+class HandoffAttempt(Base):
+    """Durable per-agent delivery/processing attempt for a required reply."""
+    __tablename__ = "handoff_attempts"
+
+    message_id = Column(Text, ForeignKey("events.id", ondelete="CASCADE"), nullable=False)
+    workspace_id = Column(UUID(as_uuid=False), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    agent_name = Column(Text, nullable=False)
+    attempt_id = Column(Text, nullable=False, default="default")
+    status = Column(Text, nullable=False, default="queued")
+    detail = Column(Text, nullable=True)
+    reply_message_id = Column(Text, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_metadata = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+    updated_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("message_id", "agent_name", "attempt_id"),
+        Index("idx_handoff_attempts_workspace_message", "workspace_id", "message_id"),
+        Index("idx_handoff_attempts_agent_status", "workspace_id", "agent_name", "status"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Materialized state tables (projections maintained by mods)
 # ---------------------------------------------------------------------------

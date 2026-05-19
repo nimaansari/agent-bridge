@@ -8,6 +8,7 @@ GET  /v1/events    Poll events (filter by after, target, channel, type)
 
 import hashlib
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app import cache
 from app.database import get_db
-from app.models import Channel, ChannelMember, EventRecord, Workspace
+from app.models import Channel, ChannelMember, EventRecord, HandoffAttempt, Workspace
 from app.pipeline_factory import pipeline
 from app.response import ResponseCode, json_response, success_response
 from app.routers.network import _verify_workspace_access, _workspace_filter
@@ -49,6 +50,54 @@ class AckEventRequest(BaseModel):
     status: str  # delivered | seen | processing | replied | failed
     detail: Optional[str] = None
     source: Optional[str] = None
+    attempt_id: Optional[str] = None
+    reply_message_id: Optional[str] = None
+
+
+def _attempt_id(value: Optional[str]) -> str:
+    value = (value or "default").strip()
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", value)[:120] or "default"
+
+
+def _reply_message_id_from_detail(detail: Optional[str]) -> Optional[str]:
+    if not detail:
+        return None
+    match = re.search(r"reply_event_id=([^;\s]+)", detail)
+    return match.group(1) if match else None
+
+
+def _upsert_handoff_attempt(
+    db: Session,
+    workspace_id: str,
+    message_id: str,
+    agent_name: str,
+    status: str,
+    detail: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    reply_message_id: Optional[str] = None,
+) -> HandoffAttempt:
+    normalized_attempt_id = _attempt_id(attempt_id)
+    attempt = db.execute(
+        select(HandoffAttempt).where(
+            HandoffAttempt.workspace_id == workspace_id,
+            HandoffAttempt.message_id == message_id,
+            HandoffAttempt.agent_name == agent_name,
+            HandoffAttempt.attempt_id == normalized_attempt_id,
+        )
+    ).scalar_one_or_none()
+    if not attempt:
+        attempt = HandoffAttempt(
+            workspace_id=workspace_id,
+            message_id=message_id,
+            agent_name=agent_name,
+            attempt_id=normalized_attempt_id,
+        )
+        db.add(attempt)
+    attempt.status = status
+    attempt.detail = detail
+    attempt.reply_message_id = reply_message_id or _reply_message_id_from_detail(detail)
+    attempt.updated_at = func.now()
+    return attempt
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +253,17 @@ async def ack_event(
     if body.status not in allowed:
         return json_response(ResponseCode.BAD_REQUEST, f"Invalid ack status: {body.status}")
 
+    _upsert_handoff_attempt(
+        db,
+        str(workspace.id),
+        event_id,
+        body.agent_name,
+        body.status,
+        body.detail,
+        body.attempt_id,
+        body.reply_message_id,
+    )
+
     original_metadata = dict(original.metadata_ or {})
     responses = dict(original_metadata.get("handoff_responses") or {})
     responses[body.agent_name] = {
@@ -272,6 +332,68 @@ async def ack_event(
         "target": result.target,
         "timestamp": result.timestamp,
         "metadata": result.metadata,
+    })
+
+
+@router.get("/events/{event_id}/handoffs")
+async def get_event_handoffs(
+    event_id: str,
+    network: str = Query(..., description="Network (workspace) ID or slug"),
+    db: Session = Depends(get_db),
+    x_workspace_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Return durable handoff attempts for one message.
+
+    This is the first production path off metadata-only handoff state. The
+    original event metadata remains for backward-compatible transcript badges,
+    while this endpoint exposes attempt rows for retries, leases, and future
+    connector dashboards.
+    """
+    workspace = db.execute(
+        select(Workspace).where(_workspace_filter(network))
+    ).scalar_one_or_none()
+    if not workspace:
+        return json_response(ResponseCode.NOT_FOUND, "Network not found")
+    if not _verify_workspace_access(workspace, x_workspace_token, authorization):
+        return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == event_id,
+        )
+    ).scalar_one_or_none()
+    if not original:
+        return json_response(ResponseCode.NOT_FOUND, "Event not found")
+
+    attempts = db.execute(
+        select(HandoffAttempt)
+        .where(
+            HandoffAttempt.workspace_id == workspace.id,
+            HandoffAttempt.message_id == event_id,
+        )
+        .order_by(HandoffAttempt.agent_name.asc(), HandoffAttempt.created_at.asc())
+    ).scalars().all()
+    return success_response({
+        "message_id": event_id,
+        "handoff_state": (original.metadata_ or {}).get("handoff_state"),
+        "required_responses": (original.metadata_ or {}).get("required_responses") or [],
+        "attempts": [
+            {
+                "message_id": row.message_id,
+                "agent_name": row.agent_name,
+                "attempt_id": row.attempt_id,
+                "status": row.status,
+                "detail": row.detail,
+                "reply_message_id": row.reply_message_id,
+                "lease_expires_at": row.lease_expires_at.isoformat() if row.lease_expires_at else None,
+                "metadata": row.attempt_metadata or {},
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in attempts
+        ],
     })
 
 

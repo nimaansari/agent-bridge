@@ -573,3 +573,48 @@ class TestPollEvents:
         """Polling nonexistent network returns 404."""
         resp = client.get("/v1/events", params={"network": "nonexistent"})
         assert resp.status_code == 404
+
+
+class TestHandoffAttempts:
+    """Durable handoff attempt endpoint."""
+
+    def test_ack_creates_durable_handoff_attempt(self, client, workspace):
+        """Ack writes should also materialize durable attempt rows."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha please respond"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        ack = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "replied",
+            "attempt_id": "attempt-1",
+            "reply_message_id": "reply-123",
+            "detail": "reply_event_id=reply-123; runtime=test",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert ack.status_code == 200
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert handoffs.status_code == 200
+        data = handoffs.json()["data"]
+        assert data["handoff_state"] == "complete"
+        assert data["required_responses"] == ["agent-alpha"]
+        assert len(data["attempts"]) == 1
+        attempt = data["attempts"][0]
+        assert attempt["message_id"] == event_id
+        assert attempt["agent_name"] == "agent-alpha"
+        assert attempt["attempt_id"] == "attempt-1"
+        assert attempt["status"] == "replied"
+        assert attempt["reply_message_id"] == "reply-123"
