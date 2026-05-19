@@ -137,7 +137,8 @@ def clean_reply(raw: str) -> str:
 
 
 def run_openclaw_turn(session_id: str, prompt: str, timeout: int) -> str:
-    cmd = ["openclaw", "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
+    openclaw_bin = os.environ.get("OPENCLAW_BIN", "/home/nimapro1381/.npm-global/bin/openclaw")
+    cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 30)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or f"openclaw exited {proc.returncode}").strip())
