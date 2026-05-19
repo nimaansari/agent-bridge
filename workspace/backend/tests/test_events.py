@@ -206,6 +206,91 @@ class TestSendEvent:
         # Explicit @mention routes directly to the mentioned agent
         assert data["metadata"]["target_agents"] == ["agent-gamma"]
 
+    def test_human_direct_address_routes_to_joined_agent_name(self, client, workspace):
+        """Natural addressing uses the actual joined session agent id."""
+        client.post("/v1/join", json={
+            "agent_name": "Amin",
+            "token": workspace["token"],
+            "network": workspace["id"],
+        })
+
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Amin are you here?"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["target_agents"] == ["Amin"]
+
+    def test_human_mention_supports_dotted_agent_ids(self, client, workspace):
+        """@mr.robot should target the joined mr.robot identity, not truncate at the dot."""
+        client.post("/v1/join", json={
+            "agent_name": "mr.robot",
+            "token": workspace["token"],
+            "network": workspace["id"],
+        })
+
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@mr.robot can you see this?"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["target_agents"] == ["mr.robot"]
+
+    def test_human_multi_name_message_targets_all_named_joined_agents(self, client, workspace):
+        """Naming two session agents in plain text targets both delivery identities."""
+        for name in ["Amin", "mr.robot"]:
+            client.post("/v1/join", json={
+                "agent_name": name,
+                "token": workspace["token"],
+                "network": workspace["id"],
+            })
+
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Amin and mr.robot please compare notes."},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert set(data["metadata"]["target_agents"]) == {"Amin", "mr.robot"}
+
+    def test_human_display_name_alias_routes_to_stable_agent_name(self, client, workspace):
+        """Display labels are aliases, but delivery still uses stable agent_name."""
+        client.patch(
+            f"/v1/workspaces/{workspace['id']}/members/agent-alpha",
+            json={"display_name": "Amin"},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Amin are you here?"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["target_agents"] == ["agent-alpha"]
+
 
 class TestPollEvents:
     """GET /v1/events — poll events from a network."""
