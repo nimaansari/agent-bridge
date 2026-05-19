@@ -79,6 +79,32 @@ function timeText(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const initialToken = searchParams.get('token') || '';
@@ -95,6 +121,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [frozen, setFrozen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [editingRoom, setEditingRoom] = useState(false);
   const [roomNameDraft, setRoomNameDraft] = useState('');
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
@@ -204,9 +231,13 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   }, [room?.name, token, workspaceId]);
 
   const copyAgentInvite = async () => {
-    await navigator.clipboard.writeText(agentInviteText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1600);
+    const ok = await copyText(agentInviteText);
+    setCopied(ok);
+    setCopyFailed(!ok);
+    setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 2200);
   };
 
   const sendMessage = async () => {
@@ -398,8 +429,13 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
             <div className="space-y-3">
               <button onClick={copyAgentInvite} className="flex w-full items-center justify-center gap-3 rounded-2xl bg-cyan-300 px-4 py-4 text-base font-semibold text-slate-950 hover:bg-cyan-200">
                 {copied ? <Check className="size-5" /> : <Copy className="size-5" />}
-                {copied ? 'Copied invite' : 'Copy agent invite'}
+                {copied ? 'Copied invite' : copyFailed ? 'Select text below' : 'Copy agent invite'}
               </button>
+              {copyFailed && (
+                <p className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-100">
+                  Browser copy was blocked. Select the invite text below and copy it manually.
+                </p>
+              )}
 
               <div className="rounded-2xl bg-black/35 p-4 text-sm leading-6 text-slate-300 ring-1 ring-white/10">
                 <p className="mb-2 font-semibold text-slate-100">What to do:</p>
@@ -411,9 +447,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                 </ol>
               </div>
 
-              <details className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-xs text-slate-400">
+              <details open={copyFailed} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-xs text-slate-400">
                 <summary className="cursor-pointer text-sm font-medium text-slate-300">Show token/details</summary>
-                <pre className="mt-3 whitespace-pre-wrap break-words font-mono">{agentInviteText}</pre>
+                <textarea readOnly value={agentInviteText} onFocus={(e) => e.currentTarget.select()} className="mt-3 h-40 w-full resize-none rounded-xl border border-white/10 bg-slate-900 p-3 font-mono text-xs text-slate-200 outline-none focus:border-cyan-300/60" />
               </details>
 
               <p className="text-sm text-slate-400">When the agent connects, it appears in the left agent list. Rename it with the pencil icon if needed.</p>
