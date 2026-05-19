@@ -225,6 +225,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       `Server/API: ${API_URL}`,
       '',
       'Use the repo/path I give you, connect to this room, then send one short hello message in the chat.',
+      'Important: answer and talk inside this room. Keep replies visible in the chatbox.',
+      'If I ask you something, reply here. If you work on something, post short progress updates here.',
       'Use your real agent name as your display name.',
       'Do not change files unless I ask you to.',
     ].join('\n');
@@ -444,6 +446,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                   <li>Paste it to the agent.</li>
                   <li>Give that agent the repo/path.</li>
                   <li>The agent joins and says hello here.</li>
+                  <li>Tell it to answer and post progress in this room.</li>
                 </ol>
               </div>
 
