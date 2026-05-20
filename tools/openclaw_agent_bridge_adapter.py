@@ -29,6 +29,10 @@ from typing import Any
 TERMINAL_ACKS = {"replied", "failed"}
 DEFAULT_STATE = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_adapter_state.json"
 DEFAULT_CONFIG = Path.home() / ".openclaw" / "workspace" / "agent-bridge" / ".tmp" / "openclaw_agent_bridge_agents.json"
+TOOL_REQUIRED_RE = re.compile(
+    r"\b(ssh|ubuntu|server|deploy|docker|compose|systemctl|journalctl|git\s+(?:status|pull|push|commit|diff)|repo|logs?|terminal|shell|host|100\.97\.69\.95)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,12 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
     tmp.replace(path)
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 def http_json(method: str, url: str, token: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -151,6 +161,35 @@ def post_reply(base: str, network: str, channel: str, token: str, agent_name: st
         "visibility": "channel",
     }
     return http_json("POST", f"{base}/v1/events", token, payload)["data"]
+
+
+def is_tool_required_event(event: dict[str, Any]) -> bool:
+    payload = event.get("payload") or {}
+    metadata = event.get("metadata") or {}
+    if metadata.get("operator_required") or metadata.get("tool_required"):
+        return True
+    content = str(payload.get("content") or "")
+    return bool(TOOL_REQUIRED_RE.search(content))
+
+
+def operator_queue_path(args: argparse.Namespace) -> Path:
+    configured = os.environ.get("AGENT_BRIDGE_OPERATOR_QUEUE")
+    if configured:
+        return Path(configured).expanduser()
+    return args.state.parent / "agent_bridge_operator_requests.jsonl"
+
+
+def enqueue_operator_request(args: argparse.Namespace, binding: AgentBinding, event: dict[str, Any]) -> None:
+    append_jsonl(operator_queue_path(args), {
+        "queued_at": int(time.time() * 1000),
+        "network": args.network,
+        "channel": args.channel,
+        "agent_name": binding.agent_name,
+        "event_id": event.get("id"),
+        "source": event.get("source"),
+        "payload": event.get("payload") or {},
+        "metadata": event.get("metadata") or {},
+    })
 
 
 def source_agent(source: str) -> str | None:
@@ -526,6 +565,20 @@ def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: Agent
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
+
+    if is_sessionless_runtime(binding.runtime) and is_tool_required_event(event):
+        enqueue_operator_request(args, binding, event)
+        reply = (
+            "Tool-required request received. I am not refusing this: the sessionless Agent Bridge model path has no shell/SSH tools, "
+            "so I queued this for the tool-capable mr.robot operator runtime instead of pretending I cannot access the server. "
+            "The operator path has the Ubuntu/SSH access and should handle the repo/server work."
+        )
+        reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
+        detail = f"reply_event_id={reply_event['id']}; runtime={binding.runtime}; operator_queue={operator_queue_path(args)}"
+        safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
+        print(json.dumps({"agent": binding.agent_name, "operator_queued": event_id, "reply_event_id": reply_event["id"], "queue": str(operator_queue_path(args))}), flush=True)
+        return
+
     reply, session_id, recovered = run_runtime_turn_with_recovery(state, args, binding, build_prompt(event, binding))
     reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
     detail = f"reply_event_id={reply_event['id']}; runtime={binding.runtime}; session_id={session_id}"
