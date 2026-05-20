@@ -643,6 +643,38 @@ async def update_channel(
     return success_response(_format_channel(channel))
 
 
+@router.delete("/{workspace_id}/channels/{channel_name}")
+async def delete_channel(
+    workspace_id: str,
+    channel_name: str,
+    db: Session = Depends(get_db),
+    x_workspace_token: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Soft-delete a session/channel from the dashboard."""
+    workspace = db.execute(
+        select(Workspace).where(_workspace_filter(workspace_id))
+    ).scalar_one_or_none()
+    if not workspace:
+        return json_response(ResponseCode.NOT_FOUND, "Workspace not found")
+    if not _verify_workspace_access(workspace, x_workspace_token, authorization):
+        return json_response(ResponseCode.UNAUTHORIZED, "Invalid credentials")
+
+    channel = db.execute(
+        select(Channel).where(
+            Channel.workspace_id == workspace.id,
+            Channel.name == channel_name,
+        )
+    ).scalar_one_or_none()
+    if not channel or channel.status == "deleted":
+        return json_response(ResponseCode.NOT_FOUND, "Channel not found")
+
+    channel.status = "deleted"
+    channel.master_agent = None
+    db.commit()
+    return success_response({"channelName": channel_name, "status": "deleted"})
+
+
 # ---------------------------------------------------------------------------
 # DELETE /v1/workspaces/{workspace_id} — Delete workspace
 # ---------------------------------------------------------------------------

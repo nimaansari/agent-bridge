@@ -307,6 +307,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [removingAgent, setRemovingAgent] = useState<string | null>(null);
+  const [deletingSession, setDeletingSession] = useState(false);
   const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -579,7 +580,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const removeAgent = async (agent: Agent) => {
     if (removingAgent) return;
     const label = agentLabel(agent);
-    if (!window.confirm(`Remove ${label} from this session? They will need a fresh invite to rejoin.`)) return;
+    if (!window.confirm(`Delete ${label} from this session? They will disappear from the sidebar and need a fresh invite to rejoin.`)) return;
     setRemovingAgent(agent.agentName);
     setError(null);
     try {
@@ -592,6 +593,31 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       setError(err instanceof Error ? err.message : `Failed to remove ${label}`);
     } finally {
       setRemovingAgent(null);
+    }
+  };
+
+  const deleteCurrentSession = async () => {
+    if (!currentChannel || deletingSession) return;
+    const current = channels.find((channel) => channelName(channel.address) === currentChannel);
+    const label = current?.title || currentChannel;
+    if (!window.confirm(`Delete session “${label}”? This hides it from the dashboard session list.`)) return;
+    setDeletingSession(true);
+    setError(null);
+    try {
+      await apiFetch(`/v1/workspaces/${workspaceId}/channels/${encodeURIComponent(currentChannel)}`, { method: 'DELETE' });
+      const remaining = channels.filter((channel) => channelName(channel.address) !== currentChannel && channel.status !== 'deleted');
+      setChannels(remaining);
+      const next = remaining[0]?.address ? channelName(remaining[0].address) : '';
+      setCurrentChannel(next);
+      setMessages([]);
+      if (next) {
+        try { window.localStorage.setItem(`agentBridgeCurrentChannel:${workspaceId}`, next); } catch {}
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete session');
+    } finally {
+      setDeletingSession(false);
     }
   };
 
@@ -619,8 +645,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         <button className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-slate-300 hover:border-cyan-300/40 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">
           <Edit3 className="size-3.5" /> Rename
         </button>
-        <button disabled={removingAgent === agent.agentName} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-300/20 px-2 py-1.5 text-xs text-rose-100 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => removeAgent(agent)} title="Remove agent from session">
-          {removingAgent === agent.agentName ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />} Remove
+        <button disabled={removingAgent === agent.agentName} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-300/20 px-2 py-1.5 text-xs text-rose-100 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50" onClick={() => removeAgent(agent)} title="Delete agent from session">
+          {removingAgent === agent.agentName ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />} Delete
         </button>
       </div>
     </div>
@@ -704,6 +730,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="flex items-center gap-2">
             <button onClick={() => setConnectOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 lg:hidden"><Plus className="size-4" /> Add agent</button>
             <button onClick={refresh} className="rounded-xl border border-white/10 p-2 text-slate-300 hover:border-cyan-300/40"><RefreshCw className={loading ? 'size-4 animate-spin' : 'size-4'} /></button>
+            <button disabled={deletingSession || !currentChannel} onClick={deleteCurrentSession} className="inline-flex items-center gap-2 rounded-xl border border-rose-300/20 px-3 py-2 text-sm text-rose-100 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50">
+              {deletingSession ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete session
+            </button>
             <button disabled={savingFreeze} onClick={toggleFreeze} className={frozen ? 'inline-flex items-center gap-2 rounded-xl bg-amber-300 px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60' : 'inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 disabled:opacity-60'}>
               <Snowflake className="size-4" /> {savingFreeze ? 'Saving…' : frozen ? 'Frozen' : 'Freeze'}
             </button>
