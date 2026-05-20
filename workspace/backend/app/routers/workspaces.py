@@ -94,6 +94,23 @@ class WorkspaceUpdateRequest(BaseModel):
     settings: Optional[dict] = None
     status: Optional[str] = None
 
+
+def _collaboration_policy(settings: Optional[dict]) -> dict:
+    settings = settings or {}
+    raw_budget = settings.get("agent_reply_budget") or settings.get("max_agent_reply_depth")
+    try:
+        budget = max(0, int(raw_budget))
+    except Exception:
+        budget = 2
+    return {
+        "mode": settings.get("agent_collaboration_mode") or "assisted",
+        "agentReplyBudget": budget,
+        "requireAnchoredAgentReplies": bool(settings.get("require_anchored_agent_replies", True)),
+        "requireNeedsReplyForAgentWake": bool(settings.get("require_needs_reply_for_agent_wake", True)),
+        "terminalStatuses": settings.get("agent_terminal_statuses") or ["done", "blocked", "need_input", "needs_user", "proposal", "failed", "cancelled"],
+        "loopGuardEnabled": bool(settings.get("loop_guard_enabled", True)),
+    }
+
 class CollaboratorAddRequest(BaseModel):
     email: str
     role: str = Field(default="editor", pattern=r"^(editor|viewer)$")
@@ -132,6 +149,7 @@ def _format_workspace(ws: Workspace, members: list, now: datetime) -> dict:
         "name": ws.name,
         "creatorEmail": ws.creator_email,
         "settings": ws.settings or {},
+        "collaborationPolicy": _collaboration_policy(ws.settings),
         "status": ws.status,
         "createdAt": ws.created_at.isoformat() if ws.created_at else None,
         "lastActivityAt": ws.last_activity_at.isoformat() if ws.last_activity_at else None,

@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, Snowflake, Trash2, User, X } from 'lucide-react';
+import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, ShieldCheck, Snowflake, Trash2, User, X } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
 
@@ -20,8 +20,17 @@ type Room = {
   slug: string;
   name: string;
   settings: Record<string, unknown>;
+  collaborationPolicy?: CollaborationPolicy;
   status: string;
   agents: Agent[];
+};
+type CollaborationPolicy = {
+  mode: string;
+  agentReplyBudget: number;
+  requireAnchoredAgentReplies: boolean;
+  requireNeedsReplyForAgentWake: boolean;
+  terminalStatuses: string[];
+  loopGuardEnabled: boolean;
 };
 type Channel = {
   address: string;
@@ -53,6 +62,10 @@ type ChatMessage = {
   responseRequired: boolean;
   requiredResponses: string[];
   handoffResponses: Record<string, string>;
+  needsReply: boolean | null;
+  agentReplyDepth: number | null;
+  loopGuard: string | null;
+  handoffState: string | null;
 };
 
 type MessageAck = {
@@ -143,6 +156,10 @@ function eventToMessage(event: EventRecord): ChatMessage {
     acks: [],
     responseRequired: Boolean(metadata.response_required),
     requiredResponses: Array.isArray(metadata.required_responses) ? metadata.required_responses as string[] : [],
+    needsReply: typeof metadata.needs_reply === 'boolean' ? metadata.needs_reply : null,
+    agentReplyDepth: typeof metadata.agent_reply_depth === 'number' ? metadata.agent_reply_depth : null,
+    loopGuard: typeof metadata.loop_guard === 'string' ? metadata.loop_guard : null,
+    handoffState: typeof metadata.handoff_state === 'string' ? metadata.handoff_state : null,
     handoffResponses: typeof metadata.handoff_responses === 'object' && metadata.handoff_responses !== null
       ? Object.fromEntries(Object.entries(metadata.handoff_responses as Record<string, { status?: unknown }>).map(([agent, value]) => [agent, String(value?.status || '')]))
       : {},
@@ -200,6 +217,25 @@ function ackLabel(status: string) {
   if (status === 'failed') return 'failed';
   if (status === 'seen') return 'seen';
   return 'delivered';
+}
+
+function loopGuardLabel(value: string) {
+  if (value === 'needs_reply_required') return 'paused: needs_reply required';
+  if (value === 'reply_budget_exceeded') return 'paused: depth budget exceeded';
+  if (value === 'terminal_no_reply') return 'terminal: no reply needed';
+  if (value === 'needs_reply_false') return 'terminal: needs_reply=false';
+  return value.replaceAll('_', ' ');
+}
+
+function defaultPolicy(): CollaborationPolicy {
+  return {
+    mode: 'assisted',
+    agentReplyBudget: 2,
+    requireAnchoredAgentReplies: true,
+    requireNeedsReplyForAgentWake: true,
+    terminalStatuses: ['done', 'blocked', 'need_input', 'needs_user', 'proposal', 'failed', 'cancelled'],
+    loopGuardEnabled: true,
+  };
 }
 
 function hasTerminalAck(message: ChatMessage, agentName: string) {
@@ -352,6 +388,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   }, [messages.length]);
 
   const agentsByName = useMemo(() => new Map((room?.agents || []).map((a) => [a.agentName, a])), [room?.agents]);
+  const collaborationPolicy = room?.collaborationPolicy || defaultPolicy();
 
   const activateToken = () => {
     if (!tokenInput.trim()) return;
@@ -426,7 +463,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     setDraft('');
     const replyTo = replyDraft;
     setReplyDraft(null);
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {} };
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {}, needsReply: null, agentReplyDepth: null, loopGuard: null, handoffState: null };
     setMessages((prev) => [...prev, optimistic]);
     try {
       await apiFetch('/v1/events', {
@@ -593,6 +630,24 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <Plus className="size-4" /> Add agent
         </button>
 
+        <div className="mb-4 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-3 text-xs text-cyan-50">
+          <div className="mb-2 flex items-center gap-2 font-semibold text-cyan-100">
+            <ShieldCheck className="size-4" /> Collaboration policy
+          </div>
+          <div className="space-y-1.5 text-slate-300">
+            <div className="flex justify-between gap-3"><span>Mode</span><span className="font-medium text-white">{collaborationPolicy.mode}</span></div>
+            <div className="flex justify-between gap-3"><span>Agent depth</span><span className="font-medium text-white">{collaborationPolicy.agentReplyBudget}</span></div>
+            <div className="flex justify-between gap-3"><span>Wake rule</span><span className="font-medium text-white">{collaborationPolicy.requireNeedsReplyForAgentWake ? 'needs_reply=true' : 'implicit allowed'}</span></div>
+            <div className="flex justify-between gap-3"><span>Anchors</span><span className="font-medium text-white">{collaborationPolicy.requireAnchoredAgentReplies ? 'required' : 'optional'}</span></div>
+            <div className="flex justify-between gap-3"><span>Loop guard</span><span className="font-medium text-white">{collaborationPolicy.loopGuardEnabled ? 'on' : 'off'}</span></div>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {collaborationPolicy.terminalStatuses.map((status) => (
+              <span key={status} className="rounded-full bg-slate-950/70 px-2 py-0.5 text-[10px] text-slate-300">{status}</span>
+            ))}
+          </div>
+        </div>
+
         <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-white/10 bg-white/[0.04] p-3 pr-2">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-semibold">Agents</h2>
@@ -632,6 +687,10 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
         {error && <div className="shrink-0 border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
         {frozen && <div className="shrink-0 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
+
+        <div className="shrink-0 border-b border-cyan-300/10 bg-cyan-300/[0.06] px-4 py-2 text-xs text-slate-300">
+          <span className="font-semibold text-cyan-100">Policy:</span> {collaborationPolicy.mode} · depth {collaborationPolicy.agentReplyBudget} · wake on {collaborationPolicy.requireNeedsReplyForAgentWake ? 'needs_reply=true' : 'implicit replies'} · terminals {collaborationPolicy.terminalStatuses.join(', ')}
+        </div>
 
         <div className="shrink-0 border-b border-white/10 bg-slate-950/90 px-4 py-3 lg:hidden">
           <details className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
@@ -696,6 +755,26 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                               {ack.agentName}: {ackLabel(ack.status)}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {(message.needsReply !== null || message.agentReplyDepth !== null || message.loopGuard || message.handoffState) && (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {message.needsReply !== null && (
+                            <span className={message.needsReply ? 'rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-0.5 text-[11px] text-cyan-100' : 'rounded-full border border-slate-400/20 bg-slate-400/10 px-2 py-0.5 text-[11px] text-slate-300'}>
+                              needs_reply={String(message.needsReply)}
+                            </span>
+                          )}
+                          {message.agentReplyDepth !== null && (
+                            <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2 py-0.5 text-[11px] text-violet-100">depth {message.agentReplyDepth}/{collaborationPolicy.agentReplyBudget}</span>
+                          )}
+                          {message.handoffState && (
+                            <span className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-300">handoff {message.handoffState}</span>
+                          )}
+                          {message.loopGuard && (
+                            <span className={message.loopGuard === 'reply_budget_exceeded' || message.loopGuard === 'needs_reply_required' ? 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
+                              {loopGuardLabel(message.loopGuard)}
+                            </span>
+                          )}
                         </div>
                       )}
                       {message.responseRequired && message.requiredResponses.length > 0 && (
