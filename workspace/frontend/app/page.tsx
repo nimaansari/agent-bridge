@@ -23,6 +23,7 @@ import {
   RefreshCw,
   ShieldCheck,
   TerminalSquare,
+  Trash2,
   Users,
   Zap,
 } from 'lucide-react';
@@ -147,6 +148,7 @@ export default function AgentBridgeDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
   const [createdToken, setCreatedToken] = useState<{ workspaceId: string; token: string } | null>(null);
   const [workspaceTokens, setWorkspaceTokens] = useState<Record<string, string>>({});
 
@@ -204,6 +206,37 @@ export default function AgentBridgeDashboard() {
     if (!knownToken) rememberWorkspaceToken(workspace.workspaceId, token);
     window.location.href = `/${workspace.workspaceId}?token=${encodeURIComponent(token)}`;
   }, [rememberWorkspaceToken, workspaceTokens]);
+
+  const deleteWorkspace = useCallback(async (workspace: Workspace) => {
+    if (deletingWorkspace) return;
+    const knownToken = workspaceTokens[workspace.workspaceId];
+    const token = knownToken || window.prompt(`Enter the session token to delete “${workspace.name}”`);
+    if (!token) return;
+    if (!window.confirm(`Delete session “${workspace.name}”? It will be removed from this dashboard list.`)) return;
+
+    setDeletingWorkspace(workspace.workspaceId);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/v1/workspaces/${workspace.workspaceId}`, {
+        method: 'DELETE',
+        headers: { 'X-Workspace-Token': token },
+      });
+      if (!res.ok) throw new Error(`Delete session returned ${res.status}`);
+      setWorkspaces((prev) => prev.filter((item) => item.workspaceId !== workspace.workspaceId));
+      setWorkspaceTokens((prev) => {
+        const next = { ...prev };
+        delete next[workspace.workspaceId];
+        try { window.localStorage.setItem('agentBridgeWorkspaceTokens', JSON.stringify(next)); } catch {}
+        return next;
+      });
+      if (createdToken?.workspaceId === workspace.workspaceId) setCreatedToken(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to delete session');
+    } finally {
+      setDeletingWorkspace(null);
+    }
+  }, [createdToken?.workspaceId, deletingWorkspace, refresh, workspaceTokens]);
 
   const totals = useMemo(() => {
     const agents = workspaces.reduce((sum, ws) => sum + (ws.agents?.length || 0), 0);
@@ -336,9 +369,14 @@ export default function AgentBridgeDashboard() {
                           {workspace.slug && <span className="inline-flex items-center gap-1"><KeyRound className="size-3.5" /> slug {workspace.slug}</span>}
                         </div>
                       </div>
-                      <button type="button" onClick={() => openWorkspace(workspace)} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
-                        {workspaceTokens[workspace.workspaceId] ? 'Open session' : 'Open with token'}
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" onClick={() => openWorkspace(workspace)} className="inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-300/40 hover:text-white">
+                          {workspaceTokens[workspace.workspaceId] ? 'Open session' : 'Open with token'}
+                        </button>
+                        <button type="button" disabled={deletingWorkspace === workspace.workspaceId} onClick={() => deleteWorkspace(workspace)} className="inline-flex items-center justify-center gap-2 rounded-full border border-rose-300/20 px-4 py-2 text-sm text-rose-100 transition hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50">
+                          {deletingWorkspace === workspace.workspaceId ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Delete
+                        </button>
+                      </div>
                     </div>
                     {!!workspace.agents?.length && (
                       <div className="mt-4 grid gap-2 md:grid-cols-2">
