@@ -18,9 +18,10 @@ import type {
   WorkspaceInvitation,
   WorkspaceSession,
 } from './types';
+import { getApiUrl } from './api-base';
 import { eventToMessage } from './types';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
+const API_URL = getApiUrl();
 
 /** Map snake_case file response from backend to camelCase WorkspaceFile. */
 function mapFileResponse(raw: Record<string, unknown>): WorkspaceFile {

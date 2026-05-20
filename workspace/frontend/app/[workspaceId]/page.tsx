@@ -2,8 +2,9 @@
 
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, ShieldCheck, Snowflake, Trash2, User, X } from 'lucide-react';
+import { getApiUrl } from '../../lib/api-base';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
+const API_URL = getApiUrl();
 
 type ApiEnvelope<T> = { code?: number; message?: string; data?: T };
 type Agent = {

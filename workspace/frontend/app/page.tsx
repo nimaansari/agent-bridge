@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { getApiUrl } from '../lib/api-base';
 import {
   Activity,
   Archive,
@@ -55,7 +56,7 @@ type Workspace = {
 
 type HealthState = 'checking' | 'online' | 'degraded';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3010';
+const API_URL = getApiUrl();
 
 function unwrap<T>(payload: T | ApiEnvelope<T>): T {
   if (payload && typeof payload === 'object' && 'data' in payload) {
