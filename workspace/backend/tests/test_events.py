@@ -624,6 +624,51 @@ class TestHandoffAttempts:
         assert attempt["status"] == "replied"
         assert attempt["reply_message_id"] == "reply-123"
 
+
+    def test_replied_ack_repairs_same_attempt_after_failed_ack(self, client, workspace):
+        """A real reply must win over an earlier failed ack for the same adapter attempt."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "agent-alpha answer after transient failure"},
+            "metadata": {"target_agents": ["agent-alpha"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        event_id = resp.json()["data"]["id"]
+
+        failed = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "failed",
+            "attempt_id": "default",
+            "retryable": True,
+            "detail": "transient gateway failure",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert failed.status_code == 200
+
+        replied = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "agent-alpha",
+            "status": "replied",
+            "attempt_id": "default",
+            "reply_message_id": "reply-456",
+            "detail": "reply_event_id=reply-456; runtime=openclaw",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert replied.status_code == 200
+
+        handoffs = client.get(
+            f"/v1/events/{event_id}/handoffs",
+            params={"network": workspace["id"]},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert handoffs.status_code == 200
+        attempt = handoffs.json()["data"]["attempts"][0]
+        assert attempt["status"] == "replied"
+        assert attempt["reply_message_id"] == "reply-456"
+
     def test_retryable_failed_attempt_does_not_complete_obligation_and_can_requeue(self, client, workspace):
         """A retryable failed attempt is terminal only for that attempt, then requeue creates a new obligation attempt."""
         channel_name = workspace["channel"]["name"]

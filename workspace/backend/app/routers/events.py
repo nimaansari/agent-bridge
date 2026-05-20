@@ -244,12 +244,14 @@ def _upsert_handoff_attempt(
     terminal_statuses = {"replied", "failed", "cancelled"}
     if attempt.status in terminal_statuses:
         # A stale adapter/watchdog can reconnect and replay older lifecycle
-        # acks (delivered/seen/processing/failed) for the same attempt after a
-        # successful reply was already recorded. Treat terminal attempts as
-        # immutable unless the caller creates a distinct attempt_id (normally
-        # via /handoffs/requeue). This keeps per-agent inbox delivery durable:
-        # a completed required response must not regress back into the queue.
-        return attempt
+        # acks for the same attempt after completion. A successful reply is the
+        # strongest terminal state and may repair/override an earlier failed
+        # ack for the same attempt; everything else remains immutable unless the
+        # caller creates a distinct attempt_id (normally via /handoffs/requeue).
+        if status == "replied" and attempt.status == "failed":
+            pass
+        else:
+            return attempt
 
     attempt.status = status
     attempt.detail = detail
