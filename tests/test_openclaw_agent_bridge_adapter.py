@@ -18,12 +18,14 @@ from openclaw_agent_bridge_adapter import (
     record_transient_failure,
     maybe_rotate_before_turn,
     rotate_session_id,
+    run_openclaw_turn,
     run_runtime_turn_with_recovery,
     session_id_for,
     should_attach_at_head,
     should_handle,
     should_retry_now,
     slug,
+    bounded_slug,
     terminal_for_agent,
 )
 
@@ -106,6 +108,42 @@ def test_should_ignore_intermediate_and_self_messages():
 
 def test_slug_creates_openclaw_safe_session_ids():
     assert ":" not in slug("agent-bridge:workspace/channel:agent.alpha")
+
+
+
+
+def test_openclaw_runtime_retries_without_unauthorized_model_override(monkeypatch):
+    calls = []
+
+    def fake_run_command(cmd, timeout, extra_env=None):
+        calls.append(cmd)
+        if "--model" in cmd:
+            raise RuntimeError("GatewayClientRequestError: provider/model overrides are not authorized for this caller.")
+        return "ok"
+
+    monkeypatch.setattr("openclaw_agent_bridge_adapter.shutil.which", lambda name: "/usr/bin/openclaw")
+    monkeypatch.setattr("openclaw_agent_bridge_adapter.run_command", fake_run_command)
+
+    reply = run_openclaw_turn(AgentBinding("Amin", runtime="openclaw", model="openrouter/auto"), "agent-bridge-test", "hi", 30)
+
+    assert reply == "ok"
+    assert "--model" in calls[0]
+    assert "--model" not in calls[1]
+
+
+def test_openclaw_session_ids_are_bounded_for_gateway_prompt_cache():
+    state = {}
+    binding = AgentBinding("mr.robot", runtime="openclaw")
+    session_id = session_id_for(
+        state,
+        "c30ea79b-183a-4ec8-9b10-65f7cd06dab1",
+        "session-e6409d8e",
+        binding,
+    )
+
+    assert len(session_id) <= 64
+    assert session_id.startswith("agent-bridge-openclaw")
+    assert bounded_slug("x" * 100) == bounded_slug("x" * 100)
 
 
 def test_runtime_session_ids_are_namespaced_by_runtime():

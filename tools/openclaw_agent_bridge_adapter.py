@@ -12,6 +12,7 @@ same session-adapter contract.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,16 @@ class AgentBinding:
 
 def slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "agent"
+
+
+def bounded_slug(value: str, max_len: int = 64) -> str:
+    """Return a stable slug capped for OpenClaw session/prompt-cache ids."""
+    value = slug(value)
+    if len(value) <= max_len:
+        return value
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:10]
+    keep = max(1, max_len - len(digest) - 1)
+    return f"{value[:keep].rstrip('-')}-{digest}"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -316,7 +327,7 @@ def session_id_for(state: dict[str, Any], network: str, channel: str, binding: A
         legacy_sessions = state.get("openclaw_sessions") or {}
         legacy = legacy_sessions.get(key)
         prefix = binding.session_prefix or f"agent-bridge-{runtime}"
-        runtime_sessions[key] = legacy or slug(f"{prefix}-{network}-{channel}-{binding.agent_name}")
+        runtime_sessions[key] = bounded_slug(legacy) if legacy else bounded_slug(f"{prefix}-{network}-{channel}-{binding.agent_name}")
     return runtime_sessions[key]
 
 
@@ -326,7 +337,7 @@ def rotate_session_id(state: dict[str, Any], network: str, channel: str, binding
         return "one-shot"
     key = room_session_key(network, channel, binding)
     prefix = binding.session_prefix or f"agent-bridge-{runtime}"
-    new_id = slug(f"{prefix}-{network}-{channel}-{binding.agent_name}-{int(time.time())}")
+    new_id = bounded_slug(f"{prefix}-{network}-{channel}-{binding.agent_name}-{int(time.time())}")
     state.setdefault("runtime_sessions", {}).setdefault(runtime, {})[key] = new_id
     if runtime == "openclaw":
         state.setdefault("openclaw_sessions", {})[key] = new_id
@@ -425,14 +436,26 @@ def run_openclaw_turn(binding: AgentBinding, session_id: str, prompt: str, timeo
     openclaw_bin = os.environ.get("OPENCLAW_BIN") or shutil.which("openclaw")
     if not openclaw_bin:
         raise RuntimeError("openclaw binary not found; set OPENCLAW_BIN or put openclaw on PATH")
-    cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
-    if binding.openclaw_agent:
-        cmd.extend(["--agent", binding.openclaw_agent])
-    if binding.model:
-        cmd.extend(["--model", binding.model])
-    if binding.thinking:
-        cmd.extend(["--thinking", binding.thinking])
-    return run_command(cmd, timeout, binding.env)
+
+    def build_cmd(include_model: bool = True) -> list[str]:
+        cmd = [openclaw_bin, "agent", "--session-id", session_id, "--message", prompt, "--json", "--timeout", str(timeout)]
+        if binding.openclaw_agent:
+            cmd.extend(["--agent", binding.openclaw_agent])
+        if include_model and binding.model:
+            cmd.extend(["--model", binding.model])
+        if binding.thinking:
+            cmd.extend(["--thinking", binding.thinking])
+        return cmd
+
+    try:
+        return run_command(build_cmd(include_model=True), timeout, binding.env)
+    except RuntimeError as exc:
+        # Some OpenClaw installations disallow provider/model overrides for
+        # session agents. Tools should not break just because an adapter config
+        # carried a model hint, so retry with the agent/session default model.
+        if binding.model and "provider/model overrides are not authorized" in str(exc):
+            return run_command(build_cmd(include_model=False), timeout, binding.env)
+        raise
 
 
 def is_sessionless_runtime(runtime: str | None) -> bool:
