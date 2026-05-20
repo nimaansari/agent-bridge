@@ -1,15 +1,15 @@
 {
   "auto_discover": true,
   "defaults": {
-    "runtime": "openclaw_model",
-    "max_session_turns": 0,
+    "runtime": "openclaw",
+    "max_session_turns": 12,
     "max_prompt_chars": 6000,
-    "allow_session_rotation": false
+    "allow_session_rotation": true
   },
   "agents": [
     {
       "agent_name": "assistant",
-      "runtime": "openclaw_model"
+      "runtime": "openclaw"
     },
     {
       "agent_name": "reviewer",

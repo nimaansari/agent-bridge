@@ -38,7 +38,7 @@ TOOL_REQUIRED_RE = re.compile(
 @dataclass(frozen=True)
 class AgentBinding:
     agent_name: str
-    runtime: str = "openclaw_model"
+    runtime: str = "openclaw"
     openclaw_agent: str | None = None
     model: str | None = None
     thinking: str | None = None
@@ -568,7 +568,7 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
             command = [command]
         bindings.append(AgentBinding(
             agent_name=name,
-            runtime=merged.get("runtime") or merged.get("driver") or "openclaw_model",
+            runtime=merged.get("runtime") or merged.get("driver") or "openclaw",
             openclaw_agent=merged.get("openclaw_agent"),
             model=merged.get("model"),
             thinking=merged.get("thinking"),

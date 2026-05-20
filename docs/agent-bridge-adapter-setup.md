@@ -46,13 +46,13 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
 {
   "auto_discover": true,
   "defaults": {
-    "runtime": "openclaw_model",
-    "max_session_turns": 0,
+    "runtime": "openclaw",
+    "max_session_turns": 12,
     "max_prompt_chars": 6000,
-    "allow_session_rotation": false
+    "allow_session_rotation": true
   },
   "agents": [
-    { "agent_name": "assistant", "runtime": "openclaw_model" },
+    { "agent_name": "assistant", "runtime": "openclaw" },
     {
       "agent_name": "reviewer",
       "runtime": "custom",
@@ -65,13 +65,13 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
 Fields:
 
 - `agent_name`: stable delivery identity in Agent Bridge. This must match the joined agent name.
-- `runtime`: `openclaw_model` uses OpenClaw's stateless model capability path and does **not** create visible OpenClaw/ClawDeck sessions. `openclaw` is the legacy explicit-session path. Any other value requires `command`.
+- `runtime`: `openclaw` uses a real OpenClaw agent session, preserving tool/capability access for joined agents. `openclaw_model` is the stateless/text-only model capability path and should only be used when you explicitly do not want tools. Any other value requires `command`.
 - `command`: argv template for command-based runtimes. Supported placeholders: `{agent_name}`, `{runtime}`, `{session_id}`, `{message}`, `{prompt}`, `{timeout}`, `{model}`, `{thinking}`.
 - `model`, `thinking`, `openclaw_agent`: optional OpenClaw-specific options.
 - `env`: optional environment variables for this runtime command.
-- `max_session_turns`: rotate local runtime session after this many handled turns when `allow_session_rotation` is true. Default `0` disables proactive rotation so adapters do not create many runtime sessions.
+- `max_session_turns`: rotate local runtime session after this many handled turns when `allow_session_rotation` is true. Default example uses `12` so joined agents keep tools while preventing unbounded session growth.
 - `max_prompt_chars`: clamp a single inbound handoff before sending it to the runtime.
-- `allow_session_rotation`: opt-in only. Leave false for production unless you explicitly accept new runtime sessions being created after overflow.
+- `allow_session_rotation`: production OpenClaw adapter deployments should leave this true so long-running Agent Bridge sessions recover cleanly from context growth.
 - `auto_discover`: if true, the adapter discovers current channel participants and binds them using `defaults`; explicitly listed agents override defaults.
 
 ## Important behavior
