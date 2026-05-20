@@ -4,10 +4,8 @@ export function getApiUrl(): string {
 
   if (typeof window !== 'undefined') {
     const { protocol, hostname } = window.location;
-    if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
-      return `${protocol}//${hostname}:3010`;
-    }
+    if (hostname) return `${protocol}//${hostname}:3010`;
   }
 
-  return 'http://localhost:3010';
+  return '';
 }
