@@ -151,6 +151,40 @@ def _is_actionable_for_agent(row: EventRecord, agent_name: str) -> bool:
     return False
 
 
+def _control_event_for_actionable(row: EventRecord, agent_name: str) -> dict:
+    """Synthetic legacy control event for older adapters.
+
+    New adapters should poll `/v1/agents/{agent_name}/inbox`. Some live
+    connectors still poll `GET /v1/events?type=workspace.agent.control&target=
+    openagents:<agent>`. Returning actionable inbox rows through that legacy
+    shape keeps those agents connected without reintroducing watcher scripts or
+    leaking unrelated transcript noise.
+    """
+    original = _event_dict(row)
+    payload = row.payload or {}
+    return {
+        "id": f"control:{row.id}:{agent_name}",
+        "type": "workspace.agent.control",
+        "source": "agent-bridge:server",
+        "target": f"openagents:{agent_name}",
+        "payload": {
+            "action": "respond",
+            "message_id": row.id,
+            "channel": _session_id_from_target(row.target),
+            "content": payload.get("content"),
+            "event": original,
+        },
+        "metadata": {
+            "reply_to": row.id,
+            "target_agents": [agent_name],
+            "response_required": True,
+            "compatibility": "actionable_inbox_control",
+        },
+        "timestamp": row.timestamp,
+        "visibility": "direct",
+    }
+
+
 def _mark_expired_processing_attempts_stalled(db: Session, workspace_id: str, message_id: str) -> None:
     now = _utcnow()
     attempts = db.execute(
@@ -725,6 +759,46 @@ async def poll_events(
 
     if not _verify_workspace_access(workspace, x_workspace_token, authorization):
         return json_response(ResponseCode.UNAUTHORIZED, "Invalid workspace credentials")
+
+    if type == "workspace.agent.control" and target and target.startswith("openagents:"):
+        agent_name = target.split(":", 1)[1]
+        control_query = select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.type == "workspace.message.posted",
+        )
+        if channel:
+            control_query = control_query.where(EventRecord.target == f"channel/{channel}")
+        if after and after.startswith("control:"):
+            parts = after.split(":")
+            if len(parts) >= 3:
+                after = parts[1]
+        if after:
+            cursor_row = db.execute(
+                select(EventRecord.timestamp, EventRecord.id).where(EventRecord.id == after)
+            ).one_or_none()
+            if cursor_row is not None:
+                control_query = control_query.where(
+                    or_(
+                        EventRecord.timestamp > cursor_row.timestamp,
+                        and_(EventRecord.timestamp == cursor_row.timestamp, EventRecord.id > cursor_row.id),
+                    )
+                )
+        if sort == "desc":
+            control_query = control_query.order_by(EventRecord.timestamp.desc(), EventRecord.id.desc()).limit(limit * 4)
+        else:
+            control_query = control_query.order_by(EventRecord.timestamp.asc(), EventRecord.id.asc()).limit(limit * 4)
+        candidates = db.execute(control_query).scalars().all()
+        control_events = [
+            _control_event_for_actionable(row, agent_name)
+            for row in candidates
+            if _is_actionable_for_agent(row, agent_name)
+        ][:limit]
+        return success_response({
+            "events": control_events,
+            "has_more": False,
+            "oldest_id": control_events[-1]["id"] if control_events else None,
+            "newest_id": control_events[0]["id"] if control_events else None,
+        })
 
     # Two-level read-through cache for poll traffic.
     #
