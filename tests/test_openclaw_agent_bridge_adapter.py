@@ -242,6 +242,35 @@ def test_context_overflow_is_not_returned_as_visible_reply(monkeypatch):
         raise AssertionError("context overflow must raise instead of becoming chat")
 
 
+
+def test_default_binding_runtime_is_tool_capable_openclaw_session(tmp_path):
+    config = tmp_path / "agents.json"
+    config.write_text(json.dumps({"agents": [{"agent_name": "Amin"}]}))
+    args = argparse.Namespace(
+        config=config,
+        agent_name=[],
+        discover_channel_agents=False,
+        base="http://127.0.0.1:3010",
+        network="net",
+        channel="session-abc",
+        token="tok",
+    )
+
+    [binding] = load_bindings(args)
+
+    assert binding.agent_name == "Amin"
+    assert binding.runtime == "openclaw"
+    assert not binding.runtime.startswith("openclaw_model")
+
+
+def test_adapter_example_config_defaults_to_tool_capable_openclaw_session():
+    example = json.loads((ROOT / "tools" / "agent_bridge_adapter_config.example.json").read_text())
+
+    assert example["defaults"]["runtime"] == "openclaw"
+    assert example["defaults"]["allow_session_rotation"] is True
+    assert example["defaults"]["max_session_turns"] >= 1
+    assert all(agent.get("runtime", example["defaults"]["runtime"]) != "openclaw_model" for agent in example["agents"])
+
 def test_load_bindings_accepts_runtime_config(tmp_path):
     config = tmp_path / "agents.json"
     config.write_text(json.dumps({
