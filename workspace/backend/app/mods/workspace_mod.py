@@ -885,7 +885,7 @@ async def _route_with_llm(channel, new_event: Event, db, workspace) -> List[str]
 
 _DEFAULT_TITLES = {"New Thread", "Session 1", None, ""}
 _DEFAULT_AGENT_REPLY_BUDGET = 2
-_TERMINAL_AGENT_STATUSES = {"done", "blocked", "need_input", "needs_user", "failed", "cancelled"}
+_TERMINAL_AGENT_STATUSES = {"done", "blocked", "need_input", "needs_user", "proposal", "failed", "cancelled"}
 
 
 def _auto_title_channel(channel, content: str, db) -> None:
@@ -1305,13 +1305,17 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         if terminal:
             targets = []
             event.metadata["loop_guard"] = "terminal_no_reply"
+        elif needs_reply is not True:
+            # Assisted mode default: agent chatter is visible, but it does not
+            # wake another agent unless the sender explicitly marks the handoff
+            # as requiring a reply. This prevents endless implicit bot
+            # conversations while preserving auditable anchored discussion.
+            targets = []
+            event.metadata["loop_guard"] = "needs_reply_required"
         elif reply_target and agent_reply_depth > budget:
             targets = []
             event.metadata["loop_guard"] = "reply_budget_exceeded"
             event.metadata["agent_reply_budget"] = budget
-        elif needs_reply is False:
-            targets = []
-            event.metadata["loop_guard"] = "needs_reply_false"
 
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
     real_targets = [agent_name for agent_name in event.metadata["target_agents"] if agent_name != "__no_response__"]
