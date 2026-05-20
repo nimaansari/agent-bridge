@@ -44,7 +44,7 @@ journalctl --user -u agent-bridge-runtime-adapter.service -f
 
 ```json
 {
-  "auto_discover": true,
+  "auto_discover": false,
   "defaults": {
     "runtime": "openclaw",
     "max_session_turns": 12,
@@ -72,7 +72,7 @@ Fields:
 - `max_session_turns`: rotate local runtime session after this many handled turns when `allow_session_rotation` is true. Default example uses `12` so joined agents keep tools while preventing unbounded session growth.
 - `max_prompt_chars`: clamp a single inbound handoff before sending it to the runtime.
 - `allow_session_rotation`: production OpenClaw adapter deployments should leave this true so long-running Agent Bridge sessions recover cleanly from context growth.
-- `auto_discover`: if true, the adapter discovers current channel participants and binds them using `defaults`; explicitly listed agents override defaults.
+- `auto_discover`: if true, the adapter discovers current channel participants and binds them using `defaults`; explicitly listed agents override defaults. Keep false in production unless this process is authorized to speak as every discovered participant.
 
 ## Important behavior
 

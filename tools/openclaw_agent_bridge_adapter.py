@@ -871,11 +871,12 @@ def main() -> int:
                     safe_update_agent_task(args.base, args.network, args.token, binding.agent_name, f"Blocked: {task_summary_from_event(event)}", "blocked")
                     attempts = record_transient_failure(state, binding.agent_name, event, str(exc), args.retry_backoff_seconds)
                     terminal = attempts >= args.max_transient_attempts
-                    # Backend currently accepts the public statuses
-                    # delivered/seen/processing/replied/failed. Keep richer
-                    # retry semantics in adapter state/detail until the
-                    # durable attempt table lands.
-                    status = "failed"
+                    # Do not show transient runtime/auth/gateway failures as a
+                    # completed failed response. `stalled` keeps the handoff
+                    # visible and recoverable; only final exhaustion becomes
+                    # failed. This prevents adapters from falsely poisoning the
+                    # room state while an operator or connector fix is pending.
+                    status = "failed" if terminal else "stalled"
                     detail = f"attempts={attempts}; terminal={terminal}; retryable={not terminal}; error={str(exc)}"
                     try:
                         safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, status, detail)

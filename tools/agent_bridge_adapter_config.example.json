@@ -1,5 +1,5 @@
 {
-  "auto_discover": true,
+  "auto_discover": false,
   "defaults": {
     "runtime": "openclaw",
     "max_session_turns": 12,

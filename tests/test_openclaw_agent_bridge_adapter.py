@@ -333,3 +333,10 @@ def test_load_bindings_accepts_runtime_config(tmp_path):
         ("Hermes", "hermes", "openrouter/auto"),
     ]
     assert bindings[1].command == ["hermes", "chat", "--session", "{session_id}"]
+
+
+def test_example_config_does_not_auto_discover_by_default():
+    example = json.loads((ROOT / "tools" / "agent_bridge_adapter_config.example.json").read_text())
+
+    assert example.get("auto_discover") is False
+
