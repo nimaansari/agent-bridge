@@ -309,6 +309,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [removingAgent, setRemovingAgent] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
   const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
+  const [retryingHandoff, setRetryingHandoff] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -408,6 +409,29 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
   const agentsByName = useMemo(() => new Map((room?.agents || []).map((a) => [a.agentName, a])), [room?.agents]);
   const collaborationPolicy = room?.collaborationPolicy || defaultPolicy();
+
+  const retryHandoff = async (message: ChatMessage, agentName: string) => {
+    if (retryingHandoff || frozen) return;
+    const key = `${message.id}:${agentName}`;
+    setRetryingHandoff(key);
+    setError(null);
+    try {
+      await apiFetch(`/v1/events/${encodeURIComponent(message.id)}/handoffs/requeue`, {
+        method: 'POST',
+        body: JSON.stringify({
+          network: workspaceId,
+          agent_name: agentName,
+          detail: 'Requeued from session UI after failed handoff',
+          metadata: { source: 'session-ui' },
+        }),
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to retry ${agentName}`);
+    } finally {
+      setRetryingHandoff(null);
+    }
+  };
 
   const activateToken = () => {
     if (!tokenInput.trim()) return;
@@ -809,6 +833,24 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                               {ack.agentName}: {ackLabel(ack.status)}
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {Object.keys(message.handoffResponses).length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {Object.entries(message.handoffResponses).map(([agentName, status]) => {
+                            const retryKey = `${message.id}:${agentName}`;
+                            const failed = status === 'failed';
+                            return (
+                              <span key={`${message.id}-handoff-${agentName}`} className={failed ? 'inline-flex items-center gap-1.5 rounded-full border border-rose-300/20 bg-rose-300/10 px-2 py-0.5 text-[11px] text-rose-100' : status === 'queued' || status === 'processing' ? 'inline-flex items-center gap-1.5 rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'inline-flex items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
+                                <span>{agentName}: {status || 'pending'}</span>
+                                {failed && (
+                                  <button disabled={Boolean(retryingHandoff) || frozen} onClick={() => retryHandoff(message, agentName)} className="rounded-full border border-rose-200/30 px-1.5 py-0.5 text-[10px] font-semibold hover:bg-rose-200/10 disabled:cursor-not-allowed disabled:opacity-50">
+                                    {retryingHandoff === retryKey ? 'retrying…' : 'retry'}
+                                  </button>
+                                )}
+                              </span>
+                            );
+                          })}
                         </div>
                       )}
                       {(message.needsReply !== null || message.agentReplyDepth !== null || message.loopGuard || message.handoffState) && (
