@@ -365,6 +365,9 @@ async def discover(
             "server_host": m.server_host,
             "working_dir": m.working_dir,
             "description": m.description,
+            "current_task": m.current_task,
+            "task_status": m.task_status or "idle",
+            "task_updated_at": m.task_updated_at.isoformat() if m.task_updated_at else None,
             "last_heartbeat_at": m.last_heartbeat.isoformat() if m.last_heartbeat else None,
             "joined_at": m.joined_at.isoformat() if m.joined_at else None,
         })

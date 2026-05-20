@@ -13,6 +13,9 @@ type Agent = {
   agentType: string | null;
   status: string;
   description: string | null;
+  currentTask: string | null;
+  taskStatus: string;
+  taskUpdatedAt: string | null;
   lastHeartbeatAt: string | null;
 };
 type Room = {
@@ -238,6 +241,18 @@ function defaultPolicy(): CollaborationPolicy {
   };
 }
 
+function taskStatusClass(status: string) {
+  if (status === 'working') return 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100';
+  if (status === 'blocked') return 'border-rose-300/20 bg-rose-300/10 text-rose-100';
+  if (status === 'needs_user') return 'border-amber-300/20 bg-amber-300/10 text-amber-100';
+  if (status === 'done') return 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100';
+  return 'border-white/10 bg-slate-800 text-slate-300';
+}
+
+function taskStatusLabel(status: string) {
+  return status === 'needs_user' ? 'needs user' : status || 'idle';
+}
+
 function hasTerminalAck(message: ChatMessage, agentName: string) {
   if (['replied', 'failed'].includes(message.handoffResponses[agentName])) return true;
   return message.acks.some((ack) => ack.agentName === agentName && ['replied', 'failed'].includes(ack.status));
@@ -333,7 +348,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     try {
       const [roomData, discovery] = await Promise.all([
         apiFetch<Room>(`/v1/workspaces/${workspaceId}`),
-        apiFetch<{ agents: Array<{ address: string; display_name: string | null; role: string; agent_type: string | null; status: string; description: string | null; last_heartbeat_at: string | null }>; channels: Channel[] }>(`/v1/discover?network=${workspaceId}`),
+        apiFetch<{ agents: Array<{ address: string; display_name: string | null; role: string; agent_type: string | null; status: string; description: string | null; current_task: string | null; task_status: string | null; task_updated_at: string | null; last_heartbeat_at: string | null }>; channels: Channel[] }>(`/v1/discover?network=${workspaceId}`),
       ]);
 
       const agents = discovery.agents.map((a) => ({
@@ -343,6 +358,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         agentType: a.agent_type || null,
         status: a.status,
         description: a.description || null,
+        currentTask: a.current_task || null,
+        taskStatus: a.task_status || 'idle',
+        taskUpdatedAt: a.task_updated_at || null,
         lastHeartbeatAt: a.last_heartbeat_at || null,
       }));
       setRoom({ ...roomData, agents });
@@ -589,6 +607,13 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <p className="truncate text-xs text-slate-500">id: {agent.agentName}</p>
           <p className="mt-1 text-xs text-slate-400">{agent.agentType || 'agent'} · {agent.status}</p>
         </div>
+      </div>
+      <div className="mt-3 rounded-xl border border-white/10 bg-slate-950/70 p-2">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Current task</span>
+          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${taskStatusClass(agent.taskStatus)}`}>{taskStatusLabel(agent.taskStatus)}</span>
+        </div>
+        <p className="line-clamp-2 text-xs leading-5 text-slate-200">{agent.currentTask || 'No task set'}</p>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2">
         <button className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-slate-300 hover:border-cyan-300/40 hover:text-white" onClick={() => { setEditingAgent(agent.agentName); setAgentNameDraft(agentLabel(agent)); }} title="Rename agent">

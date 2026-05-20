@@ -143,6 +143,9 @@ class WorkspaceMember(Base):
     server_host = Column(Text, nullable=True)          # hostname/IP where agent runs
     working_dir = Column(Text, nullable=True)          # working directory on the server
     description = Column(Text, nullable=True)           # user-provided description of agent's role/capabilities
+    current_task = Column(Text, nullable=True)          # one-line current task/goal shown in the dashboard
+    task_status = Column(Text, default="idle")         # idle | working | blocked | done | needs_user
+    task_updated_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(Text, default="offline")         # online | offline
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
     joined_at = Column(DateTime(timezone=True), default=_now, server_default=text("NOW()"))

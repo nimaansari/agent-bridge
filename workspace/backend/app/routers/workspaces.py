@@ -139,6 +139,9 @@ def _format_workspace(ws: Workspace, members: list, now: datetime) -> dict:
             "status": status,
             "description": m.description,
             "workingDir": m.working_dir,
+            "currentTask": m.current_task,
+            "taskStatus": m.task_status or "idle",
+            "taskUpdatedAt": m.task_updated_at.isoformat() if m.task_updated_at else None,
             "lastHeartbeatAt": m.last_heartbeat.isoformat() if m.last_heartbeat else None,
             "joinedAt": m.joined_at.isoformat() if m.joined_at else None,
         })
@@ -500,6 +503,8 @@ class MemberUpdateRequest(BaseModel):
     display_name: Optional[str] = None
     description: Optional[str] = None
     role: Optional[str] = None
+    current_task: Optional[str] = Field(default=None, max_length=180)
+    task_status: Optional[str] = Field(default=None, pattern=r"^(idle|working|blocked|done|needs_user)$")
 
 
 @router.patch("/{workspace_id}/members/{agent_name}")
@@ -538,6 +543,12 @@ async def update_member(
         member.description = body.description
     if body.role is not None:
         member.role = body.role
+    if body.current_task is not None:
+        member.current_task = body.current_task.strip() or None
+        member.task_updated_at = datetime.now(timezone.utc)
+    if body.task_status is not None:
+        member.task_status = body.task_status
+        member.task_updated_at = datetime.now(timezone.utc)
 
     db.commit()
 
@@ -546,6 +557,9 @@ async def update_member(
         "displayName": member.display_name,
         "description": member.description,
         "role": member.role,
+        "currentTask": member.current_task,
+        "taskStatus": member.task_status or "idle",
+        "taskUpdatedAt": member.task_updated_at.isoformat() if member.task_updated_at else None,
     })
 
 
