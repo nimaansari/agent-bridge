@@ -144,6 +144,30 @@ def safe_post_ack(base: str, network: str, token: str, event_id: str, agent_name
         print(json.dumps({"agent": agent_name, "ack_failed": event_id, "status": status, "error": str(exc)}), file=sys.stderr, flush=True)
 
 
+def task_summary_from_event(event: dict[str, Any]) -> str:
+    payload = event.get("payload") or {}
+    content = str(payload.get("content") or "").strip().replace("\n", " ")
+    content = re.sub(r"\s+", " ", content)
+    return content[:150] + ("…" if len(content) > 150 else "") if content else f"Handle event {event.get('id')}"
+
+
+def update_agent_task(base: str, network: str, token: str, agent_name: str, current_task: str, task_status: str) -> None:
+    payload = {"current_task": current_task[:180], "task_status": task_status}
+    http_json(
+        "PATCH",
+        f"{base}/v1/workspaces/{urllib.parse.quote(network)}/members/{urllib.parse.quote(agent_name)}",
+        token,
+        payload,
+    )
+
+
+def safe_update_agent_task(base: str, network: str, token: str, agent_name: str, current_task: str, task_status: str) -> None:
+    try:
+        update_agent_task(base, network, token, agent_name, current_task, task_status)
+    except Exception as exc:
+        print(json.dumps({"agent": agent_name, "task_update_failed": str(exc)}), file=sys.stderr, flush=True)
+
+
 def post_reply(base: str, network: str, channel: str, token: str, agent_name: str, content: str, reply_to: str) -> dict[str, Any]:
     payload = {
         "network": network,
@@ -562,6 +586,8 @@ def load_bindings(args: argparse.Namespace) -> list[AgentBinding]:
 def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: AgentBinding, event: dict[str, Any]) -> None:
     event_id = event["id"]
     session_id = session_id_for(state, args.network, args.channel, binding)
+    task_summary = task_summary_from_event(event)
+    safe_update_agent_task(args.base, args.network, args.token, binding.agent_name, f"Responding: {task_summary}", "working")
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "delivered")
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "seen")
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "processing")
@@ -576,6 +602,7 @@ def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: Agent
         reply_event = post_reply(args.base, args.network, args.channel, args.token, binding.agent_name, reply, event_id)
         detail = f"reply_event_id={reply_event['id']}; runtime={binding.runtime}; operator_queue={operator_queue_path(args)}"
         safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
+        safe_update_agent_task(args.base, args.network, args.token, binding.agent_name, f"Queued for operator: {task_summary}", "done")
         print(json.dumps({"agent": binding.agent_name, "operator_queued": event_id, "reply_event_id": reply_event["id"], "queue": str(operator_queue_path(args))}), flush=True)
         return
 
@@ -585,6 +612,7 @@ def handle_event(args: argparse.Namespace, state: dict[str, Any], binding: Agent
     if recovered:
         detail += "; recovered=context_overflow_reset"
     safe_post_ack(args.base, args.network, args.token, event_id, binding.agent_name, "replied", detail)
+    safe_update_agent_task(args.base, args.network, args.token, binding.agent_name, f"Answered: {task_summary}", "done")
     print(json.dumps({"agent": binding.agent_name, "runtime": binding.runtime, "handled": event_id, "reply_event_id": reply_event["id"], "session_id": session_id, "recovered": recovered}), flush=True)
 
 
@@ -817,6 +845,7 @@ def main() -> int:
                     mark_processed(state, binding.agent_name, event_id)
                     save_state(args.state, state)
                 except Exception as exc:
+                    safe_update_agent_task(args.base, args.network, args.token, binding.agent_name, f"Blocked: {task_summary_from_event(event)}", "blocked")
                     attempts = record_transient_failure(state, binding.agent_name, event, str(exc), args.retry_backoff_seconds)
                     terminal = attempts >= args.max_transient_attempts
                     # Backend currently accepts the public statuses
