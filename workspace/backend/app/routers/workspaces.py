@@ -95,16 +95,26 @@ class WorkspaceUpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
+def _sanitize_workspace_settings(settings: Optional[dict]) -> dict:
+    clean = dict(settings or {})
+    clean.pop("agent_reply_budget", None)
+    clean.pop("max_agent_reply_depth", None)
+    return clean
+
+
 def _collaboration_policy(settings: Optional[dict]) -> dict:
-    settings = settings or {}
-    raw_budget = settings.get("agent_reply_budget") or settings.get("max_agent_reply_depth")
-    try:
-        budget = max(0, int(raw_budget))
-    except Exception:
-        budget = 2
+    settings = _sanitize_workspace_settings(settings)
     return {
         "mode": settings.get("agent_collaboration_mode") or "assisted",
-        "agentReplyBudget": budget,
+        "sessionManagerAgent": settings.get("session_manager_agent"),
+        "session_manager": {
+            "manager_agent_id": settings.get("session_manager_agent"),
+            "mode": settings.get("agent_collaboration_mode") or "assisted",
+        },
+        "active_task": settings.get("active_task"),
+        "managerRole": "session_manager",
+        "managerCanWakeAgents": True,
+        "workersReportToManager": True,
         "requireAnchoredAgentReplies": bool(settings.get("require_anchored_agent_replies", True)),
         "requireNeedsReplyForAgentWake": bool(settings.get("require_needs_reply_for_agent_wake", True)),
         "terminalStatuses": settings.get("agent_terminal_statuses") or ["done", "blocked", "need_input", "needs_user", "proposal", "failed", "cancelled"],
@@ -151,8 +161,13 @@ def _format_workspace(ws: Workspace, members: list, now: datetime) -> dict:
         "slug": ws.slug,
         "name": ws.name,
         "creatorEmail": ws.creator_email,
-        "settings": ws.settings or {},
+        "settings": _sanitize_workspace_settings(ws.settings),
         "collaborationPolicy": _collaboration_policy(ws.settings),
+        "session_manager": {
+            "manager_agent_id": (ws.settings or {}).get("session_manager_agent"),
+            "mode": (ws.settings or {}).get("agent_collaboration_mode") or "assisted",
+        },
+        "active_task": (ws.settings or {}).get("active_task"),
         "status": ws.status,
         "createdAt": ws.created_at.isoformat() if ws.created_at else None,
         "lastActivityAt": ws.last_activity_at.isoformat() if ws.last_activity_at else None,
@@ -334,7 +349,7 @@ async def update_workspace(
     if body.name is not None:
         workspace.name = body.name
     if body.settings is not None:
-        workspace.settings = body.settings
+        workspace.settings = _sanitize_workspace_settings(body.settings)
     if body.status is not None:
         workspace.status = body.status
 

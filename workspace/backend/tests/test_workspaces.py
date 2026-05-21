@@ -114,6 +114,39 @@ class TestUpdateWorkspace:
         assert resp.status_code == 200
         assert resp.json()["data"]["settings"]["theme"] == "dark"
 
+    def test_update_settings_strips_deleted_depth_keys(self, client, workspace):
+        """Deleted depth settings are discarded on write and never echoed back."""
+        resp = client.patch(f"/v1/workspaces/{workspace['id']}", json={
+            "settings": {
+                "theme": "dark",
+                "agent_reply_budget": 9,
+                "max_agent_reply_depth": 11,
+            },
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        settings = resp.json()["data"]["settings"]
+        assert settings["theme"] == "dark"
+        assert "agent_reply_budget" not in settings
+        assert "max_agent_reply_depth" not in settings
+        policy = resp.json()["data"]["collaborationPolicy"]
+        assert "agentReplyBudget" not in policy
+
+    def test_get_workspace_does_not_echo_deleted_depth_fields(self, client, workspace):
+        """Workspace detail omits deleted depth fields from settings and policy."""
+        client.patch(f"/v1/workspaces/{workspace['id']}", json={
+            "settings": {
+                "agent_reply_budget": 3,
+                "max_agent_reply_depth": 4,
+                "require_needs_reply_for_agent_wake": True,
+            },
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        resp = client.get(f"/v1/workspaces/{workspace['id']}", headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert "agent_reply_budget" not in data["settings"]
+        assert "max_agent_reply_depth" not in data["settings"]
+        assert "agentReplyBudget" not in data["collaborationPolicy"]
+
 
 class TestDeleteWorkspace:
     """DELETE /v1/workspaces/{id} — soft-delete workspace."""
@@ -334,3 +367,40 @@ class TestRemoveMember:
             f"/v1/workspaces/{workspace['id']}/members/agent-alpha",
         )
         assert resp.status_code == 401
+
+class TestManagerModeWorkspace:
+    def test_collaboration_policy_reuses_session_manager_and_active_task(self, client, workspace):
+        resp = client.patch(f"/v1/workspaces/{workspace["id"]}", json={
+            "settings": {
+                "agent_collaboration_mode": "manager",
+                "session_manager_agent": "manager-bot",
+                "active_task": "Ship release",
+            },
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["settings"]["session_manager_agent"] == "manager-bot"
+        assert data["settings"]["active_task"] == "Ship release"
+        policy = data["collaborationPolicy"]
+        assert policy["mode"] == "manager"
+        assert policy["sessionManagerAgent"] == "manager-bot"
+
+    def test_update_member_sets_current_task_and_status(self, client, workspace):
+        resp = client.patch(
+            f"/v1/workspaces/{workspace["id"]}/members/agent-alpha",
+            json={"current_task": "Review PR", "task_status": "working", "role": "session_manager"},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["currentTask"] == "Review PR"
+        assert data["taskStatus"] == "working"
+        assert data["role"] == "session_manager"
+
+        detail = client.get(
+            f"/v1/workspaces/{workspace["id"]}",
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        member = next(agent for agent in detail.json()["data"]["agents"] if agent["agentName"] == "agent-alpha")
+        assert member["currentTask"] == "Review PR"
+        assert member["taskStatus"] == "working"

@@ -2,11 +2,19 @@
 """
 mod/workspace — session routing, presence tracking, delegation.
 
+Canonical contract: see `workspace/ROUTING_CONTRACT.md` when present in the deployment workspace.
+
 Transform mod (priority 50). Handles workspace-specific event processing:
 - Agent join/leave/ping → update WorkspaceMember
 - Channel create/join/leave → manage Channel + ChannelMember rows
-- Message posted by human → route to channel master
-- Message posted by agent → LLM router decides next speaker or stop
+- Human message routing:
+  - trusted explicit metadata.target_agents is preserved as privileged input
+  - otherwise explicit @mentions or reply anchors may retarget
+  - otherwise delivery falls back to the channel master / router policy
+- Agent message routing:
+  - anchored replies are required
+  - explicit text alone is not enough to wake another agent
+  - waking another agent requires structured handoff metadata (for example needs_reply=true)
 
 Expects context.extra to contain:
   - db: SQLAlchemy Session
@@ -524,46 +532,39 @@ def _extract_leading_mention(content: str, known_agents: List[str]) -> Optional[
     return None
 
 
-def _extract_direct_address(content: str, agent_aliases: Dict[str, str]) -> Optional[str]:
-    """Return agent if message begins by addressing their name.
 
-    Chat sessions should not require @mentions for obvious turn-taking, so
-    support forms like `reviewer, ...`, `reviewer: ...`, and `reviewer are you here?`.
+def _session_manager_for_channel(channel, participant_members, workspace=None) -> Optional[str]:
+    """Return the configured session-manager/conductor for this channel.
+
+    The manager is a normal joined agent with role `session_manager` (or
+    `manager` for compatibility).  Workspaces may also pin an agent in
+    settings.session_manager_agent, but it must still be a channel participant.
     """
-    if not content or not agent_aliases:
+    participants = {p.agent_name for p in (channel.participants or []) if p.agent_name}
+    if not participants:
         return None
-    # Prefer longer aliases first so `agent.alpha` wins before `mr` if both exist.
-    for alias, agent_name in sorted(agent_aliases.items(), key=lambda item: len(item[0]), reverse=True):
-        if re.match(rf"^\s*{re.escape(alias)}(?:\s*[:,\-—]|\s+)", content, re.I):
-            return agent_name
+    settings = getattr(workspace, "settings", None) or {}
+    pinned = str(settings.get("session_manager_agent") or "").strip()
+    if pinned and pinned in participants:
+        return pinned
+    for member in participant_members or []:
+        if member.agent_name in participants and (member.role or "").lower() in {"session_manager", "manager", "conductor"}:
+            return member.agent_name
     return None
 
 
-def _extract_named_agent_references(content: str, agent_aliases: Dict[str, str]) -> List[str]:
-    """Return agents whose names/display names appear as standalone text.
-
-    This is used only as a multi-name signal. For example,
-    `agent-a and agent-b, talk here` should target both joined agents even
-    without @mentions.
-    """
-    if not content or not agent_aliases:
-        return []
-    targets: List[str] = []
-    for alias, agent_name in sorted(agent_aliases.items(), key=lambda item: len(item[0]), reverse=True):
-        if re.search(rf"(?<![\w.-]){re.escape(alias)}(?![\w.-])", content, re.I):
-            if agent_name not in targets:
-                targets.append(agent_name)
-    return targets
-
-
-def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
+def _fallback_targets(event, channel, mentions: List[str], session_manager: Optional[str] = None) -> List[str]:
     """Determine target agents when LLM router is unavailable.
 
-    Priority: explicit @mentions → master (for human/member msgs) → all participants.
+    Priority: explicit @mentions → session manager → master → first participant.
     """
     if mentions:
         return mentions
     participants = [p.agent_name for p in (channel.participants or [])]
+    if session_manager and session_manager in participants:
+        if event.source.startswith("openagents:") and event.source[len("openagents:"):] == session_manager:
+            return []
+        return [session_manager]
     if channel.master_agent and channel.master_agent in participants:
         if event.source.startswith("openagents:"):
             sender = event.source[len("openagents:"):]
@@ -571,9 +572,7 @@ def _fallback_targets(event, channel, mentions: List[str]) -> List[str]:
             if sender == channel.master_agent:
                 return []
         return [channel.master_agent]
-    # No valid master — target the first actual joined participant. This avoids
-    # stale defaults (for example old `openclaw-main`) that are no longer in the
-    # session membership.
+    # No valid manager/master — target the first actual joined participant.
     return [participants[0]] if participants else []
 
 
@@ -884,7 +883,7 @@ async def _route_with_llm(channel, new_event: Event, db, workspace) -> List[str]
 
 
 _DEFAULT_TITLES = {"New Thread", "Session 1", None, ""}
-_DEFAULT_AGENT_REPLY_BUDGET = 2
+_DEFAULT_AGENT_REPLY_BUDGET = 0
 _TERMINAL_AGENT_STATUSES = {"done", "blocked", "need_input", "needs_user", "proposal", "failed", "cancelled"}
 
 
@@ -1089,39 +1088,6 @@ def _metadata_bool(metadata: dict, key: str) -> Optional[bool]:
     return bool(value)
 
 
-def _agent_reply_budget(workspace) -> int:
-    settings = workspace.settings or {}
-    value = settings.get("agent_reply_budget") or settings.get("max_agent_reply_depth")
-    try:
-        return max(0, int(value))
-    except Exception:
-        return _DEFAULT_AGENT_REPLY_BUDGET
-
-
-def _agent_reply_depth_for_new_message(quote: Optional[dict], db, workspace) -> int:
-    """Depth of consecutive agent→agent replies for the new message.
-
-    Human messages reset the depth. Agent messages replying to another agent
-    increment from the replied-to message's stored depth. This keeps real
-    collaboration possible while bounding autonomous back-and-forth loops.
-    """
-    if not _reply_target_agent(quote):
-        return 0
-    from app.models import EventRecord
-    original = db.execute(
-        select(EventRecord).where(
-            EventRecord.network_id == workspace.id,
-            EventRecord.id == quote.get("id"),
-        )
-    ).scalar_one_or_none()
-    if not original or not original.source.startswith("openagents:"):
-        return 0
-    try:
-        return int((original.metadata_ or {}).get("agent_reply_depth") or 0) + 1
-    except Exception:
-        return 1
-
-
 def _agent_message_terminal(content: str, metadata: dict) -> bool:
     if _metadata_bool(metadata, "needs_reply") is False:
         return True
@@ -1236,16 +1202,13 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         # "yes" or "fix this".
         reply_quote = _normalize_reply_to(event, db, workspace, channel, required=False)
     reply_target = _reply_target_agent(reply_quote)
-    agent_reply_depth = 0
-    if event.source.startswith("openagents:"):
-        agent_reply_depth = _agent_reply_depth_for_new_message(reply_quote, db, workspace)
-        event.metadata["agent_reply_depth"] = agent_reply_depth
 
-    # Parse direct agent addressing against the actual joined participants in
-    # this channel, not stale workspace defaults. This is the key room/session
-    # behavior: if an agent joined as `reviewer`, messages like
-    # `reviewer are you here?` must target reviewer, never an old master such
-    # as `openclaw-main`.
+    # Routing contract is intentionally strict now:
+    # - human wakeups of non-master agents require explicit @mentions
+    # - agent->agent wakeups require structured handoff metadata
+    # - trusted explicit target_agents metadata is privileged routing input:
+    #   when a trusted caller sets it, preserve it exactly instead of silently
+    #   recomputing delivery from transcript text
     participant_names = [p.agent_name for p in (channel.participants or []) if p.agent_name]
     participant_members = db.execute(
         select(WorkspaceMember).where(
@@ -1254,22 +1217,29 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         )
     ).scalars().all() if participant_names else []
     agent_aliases = _agent_alias_map(participant_members)
+    roles_by_agent = {m.agent_name: (m.role or "member").lower() for m in participant_members}
+    settings = getattr(workspace, "settings", None) or {}
+    manager_mode = str(settings.get("agent_collaboration_mode") or "").strip().lower() in {"manager", "manager_led"}
+    session_manager = _session_manager_for_channel(channel, participant_members, workspace)
+    active_task = str(settings.get("active_task") or "").strip() or None
     mentions = _extract_mentions(content, agent_aliases)
-    named_agents = _extract_named_agent_references(content, agent_aliases)
-    direct_address = None if len(named_agents) >= 2 else _extract_direct_address(content, agent_aliases)
-    if len(named_agents) >= 2:
-        for agent_name in named_agents:
-            if agent_name not in mentions:
-                mentions.append(agent_name)
-    elif direct_address and direct_address not in mentions:
-        mentions.insert(0, direct_address)
+    explicit_targets = []
+    raw_targets = (event.metadata or {}).get("target_agents") or []
+    if isinstance(raw_targets, list):
+        for agent_name in raw_targets:
+            if isinstance(agent_name, str):
+                normalized = agent_name.strip()
+                if normalized and normalized not in explicit_targets:
+                    explicit_targets.append(normalized)
 
-    if event.source.startswith("human:") and mentions:
+    if explicit_targets:
+        targets = explicit_targets
+    elif event.source.startswith("human:") and mentions:
         targets = mentions
     elif event.source.startswith("human:") and reply_target:
         targets = [reply_target]
-    elif event.source.startswith("human:") and _looks_like_group_chat_request(content):
-        targets = _all_channel_agents(channel)
+    elif event.source.startswith("human:") and session_manager and not manager_mode:
+        targets = [session_manager]
     elif event.source.startswith("openagents:") and mentions:
         targets = mentions
     elif event.source.startswith("openagents:") and reply_target:
@@ -1281,10 +1251,10 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
             targets = await _route_with_llm(channel, event, db, workspace)
         else:
             # LLM router not available — fallback to mention or master
-            targets = _fallback_targets(event, channel, mentions)
+            targets = _fallback_targets(event, channel, mentions, session_manager)
     # ── Single-agent channel ────────────────────────────────────────
     else:
-        targets = _fallback_targets(event, channel, mentions)
+        targets = _fallback_targets(event, channel, mentions, session_manager)
 
     # ALWAYS set target_agents, even when nobody should respond.
     #
@@ -1299,39 +1269,82 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         sender_name = event.source[len("openagents:"):]
         targets = [agent_name for agent_name in targets if agent_name != sender_name]
 
-        budget = _agent_reply_budget(workspace)
         needs_reply = _metadata_bool(event.metadata, "needs_reply")
         terminal = _agent_message_terminal(content, event.metadata)
-        if terminal:
-            targets = []
-            event.metadata["loop_guard"] = "terminal_no_reply"
-        elif needs_reply is not True:
-            # Assisted mode default: agent chatter is visible, but it does not
-            # wake another agent unless the sender explicitly marks the handoff
-            # as requiring a reply. This prevents endless implicit bot
-            # conversations while preserving auditable anchored discussion.
-            targets = []
-            event.metadata["loop_guard"] = "needs_reply_required"
-        elif reply_target and agent_reply_depth > budget:
-            targets = []
-            event.metadata["loop_guard"] = "reply_budget_exceeded"
-            event.metadata["agent_reply_budget"] = budget
+        sender_role = roles_by_agent.get(sender_name, "member")
+        target_roles = {agent_name: roles_by_agent.get(agent_name, "member") for agent_name in targets}
+        targets_only_manager = bool(targets) and all(role in {"session_manager", "manager", "conductor"} for role in target_roles.values())
+        sender_is_manager = sender_role in {"session_manager", "manager", "conductor"}
+
+        if manager_mode:
+            if sender_is_manager:
+                event.metadata["response_required"] = bool(targets)
+                if active_task and content:
+                    event.metadata.setdefault("active_task", active_task)
+            elif targets_only_manager:
+                event.metadata.setdefault("routed_to_session_manager", True)
+                event.metadata["response_required"] = True
+            elif terminal:
+                targets = []
+                event.metadata["loop_guard"] = "terminal_no_reply"
+                event.metadata.pop("response_required", None)
+            elif needs_reply is not True:
+                targets = []
+                event.metadata["loop_guard"] = "needs_reply_required"
+                event.metadata.pop("response_required", None)
+            else:
+                event.metadata["response_required"] = True
+        else:
+            if sender_is_manager:
+                # The conductor may wake workers, but must still use needs_reply=true
+                # for non-terminal assignments so the handoff remains explicit.
+                if terminal:
+                    targets = []
+                    event.metadata["loop_guard"] = "terminal_no_reply"
+                elif needs_reply is not True:
+                    targets = []
+                    event.metadata["loop_guard"] = "manager_needs_reply_required"
+            elif targets_only_manager:
+                # Worker → manager reports are allowed without waking every agent.
+                # This is the safe feedback channel the conductor needs for review,
+                # summaries, blockers, and completion proofs.
+                event.metadata.setdefault("routed_to_session_manager", True)
+            elif terminal:
+                targets = []
+                event.metadata["loop_guard"] = "terminal_no_reply"
+            elif needs_reply is not True:
+                # Assisted mode default: agent chatter is visible, but it does not
+                # wake another agent unless the sender explicitly marks the handoff
+                # as requiring a reply. This prevents endless implicit bot
+                # conversations while preserving auditable anchored discussion.
+                targets = []
+                event.metadata["loop_guard"] = "needs_reply_required"
 
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
     real_targets = [agent_name for agent_name in event.metadata["target_agents"] if agent_name != "__no_response__"]
-    if event.source.startswith("openagents:") and real_targets:
-        event.metadata["response_required"] = True
-        event.metadata["required_responses"] = real_targets
-        event.metadata.setdefault("handoff_state", "pending")
-    elif event.source.startswith("openagents:"):
-        # If loop guards or terminal/no-reply metadata suppress routing, clear
-        # any caller-supplied required-response fields so the UI and inbox do
-        # not show an impossible/stale obligation for an agent that was not
-        # actually targeted.
-        event.metadata.pop("response_required", None)
-        event.metadata.pop("required_responses", None)
-        if event.metadata.get("handoff_state") == "pending":
-            event.metadata["handoff_state"] = "paused" if event.metadata.get("loop_guard") else "complete"
+    if event.source.startswith("openagents:"):
+        if manager_mode:
+            event.metadata.pop("required_responses", None)
+            event.metadata.pop("handoff_state", None)
+            if not real_targets:
+                event.metadata.pop("response_required", None)
+        elif real_targets:
+            needs_reply = _metadata_bool(event.metadata, "needs_reply")
+            sender_name = event.source[len("openagents:"):]
+            sender_role = roles_by_agent.get(sender_name, "member")
+            if needs_reply is True or sender_role in {"session_manager", "manager", "conductor"}:
+                event.metadata["response_required"] = True
+                event.metadata["required_responses"] = real_targets
+                event.metadata.setdefault("handoff_state", "pending")
+        else:
+            # If loop guards or terminal/no-reply metadata suppress routing, clear
+            # any caller-supplied required-response fields so the UI and inbox do
+            # not show an impossible/stale obligation for an agent that was not
+            # actually targeted.
+            event.metadata.pop("response_required", None)
+            event.metadata.pop("required_responses", None)
+            if event.metadata.get("handoff_state") == "pending":
+                event.metadata["handoff_state"] = "paused" if event.metadata.get("loop_guard") else "complete"
 
     # Auto-add targeted agents as channel participants so they can poll
     # for messages on this channel. Three guards:

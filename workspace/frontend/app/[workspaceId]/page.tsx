@@ -3,6 +3,9 @@
 import { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Check, Copy, Download, Edit3, FileText, Loader2, Lock, MessageCircle, Paperclip, Plus, RefreshCw, Reply, Send, ShieldCheck, Snowflake, Trash2, User, X } from 'lucide-react';
 import { getApiUrl } from '../../lib/api-base';
+import { alternateAgentRecoveryPrefill, attachmentIntentEnvelope, capabilityDiffSummary, capabilitySnapshot, collaborationSummaryFromSnapshot, composerIntentSummary, hasTerminalAck, shouldShowActionableBadge, shouldShowHandoffStatusPill } from '../../lib/collaboration-ui.mjs';
+import { reconcileMessages, restoreReplyDraft } from '../../lib/thread-continuity.mjs';
+import { appendMessageForChannel, messagesForChannel, pickActiveChannel, pruneChannelState, reconcileMessagesByChannel } from '../../lib/session-thread-state.mjs';
 
 const API_URL = getApiUrl();
 
@@ -30,11 +33,14 @@ type Room = {
 };
 type CollaborationPolicy = {
   mode: string;
-  agentReplyBudget: number;
   requireAnchoredAgentReplies: boolean;
   requireNeedsReplyForAgentWake: boolean;
   terminalStatuses: string[];
   loopGuardEnabled: boolean;
+  sessionManagerAgent?: string | null;
+  managerRole?: string;
+  managerCanWakeAgents?: boolean;
+  workersReportToManager?: boolean;
 };
 type Channel = {
   address: string;
@@ -67,9 +73,12 @@ type ChatMessage = {
   requiredResponses: string[];
   handoffResponses: Record<string, string>;
   needsReply: boolean | null;
-  agentReplyDepth: number | null;
   loopGuard: string | null;
   handoffState: string | null;
+  targetAgents: string[];
+  visibleOnly: boolean;
+  clientMessageId?: string | null;
+  pending?: boolean;
 };
 
 type MessageAck = {
@@ -102,6 +111,15 @@ function agentLabel(agent?: Pick<Agent, 'agentName' | 'displayName'> | null) {
   return agent?.displayName?.trim() || agent?.agentName || 'Agent';
 }
 
+function roleSubtitle(role?: string | null) {
+  if (!role) return null;
+  if (role === 'owner' || role === 'master') return 'Owner';
+  if (role === 'reviewer') return 'Reviewer';
+  if (role === 'session_manager' || role === 'manager' || role === 'conductor') return 'Session Manager';
+  if (role === 'observer') return 'Observer';
+  return role.replace(/[_-]+/g, ' ').replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
 function sourceName(source: string) {
   return source.replace(/^openagents:/, '').replace(/^human:/, '');
 }
@@ -110,26 +128,24 @@ function channelName(address: string) {
   return address.replace(/^channel\//, '');
 }
 
-function pickRoomChannel(channels: Channel[], currentChannel: string, workspaceId: string) {
-  const activeChannels = channels
-    .filter((channel) => channel.status !== 'deleted')
-    .sort((a, b) => (b.last_event_at || b.created_at || 0) - (a.last_event_at || a.created_at || 0));
+function draftStorageKey(workspaceId: string, channel: string) {
+  return `agentBridgeDraft:${workspaceId}:${channel}`;
+}
 
-  const availableNames = new Set(activeChannels.map((channel) => channelName(channel.address)));
-  if (currentChannel && availableNames.has(currentChannel)) return currentChannel;
+function replyStorageKey(workspaceId: string, channel: string) {
+  return `agentBridgeReply:${workspaceId}:${channel}`;
+}
 
-  try {
-    const saved = window.localStorage.getItem(`agentBridgeCurrentChannel:${workspaceId}`) || '';
-    if (saved && availableNames.has(saved)) return saved;
-  } catch {}
-
-  return activeChannels[0]?.address ? channelName(activeChannels[0].address) : '';
+function scrollStorageKey(workspaceId: string, channel: string) {
+  return `agentBridgeScroll:${workspaceId}:${channel}`;
 }
 
 function eventToMessage(event: EventRecord): ChatMessage {
   const payload = event.payload || {};
   const metadata = event.metadata || {};
   const rawReply = payload.reply_to || payload.replyTo;
+  const rawTargets = Array.isArray(metadata.target_agents) ? metadata.target_agents as string[] : [];
+  const targetAgents = rawTargets.filter((agent) => agent && agent !== '__no_response__');
   const replyTo = rawReply && typeof rawReply === 'object'
     ? rawReply as ReplyTo
     : null;
@@ -149,6 +165,7 @@ function eventToMessage(event: EventRecord): ChatMessage {
       ? 'system'
       : 'agent';
   const content = String(payload.content || (event.type === 'workspace.file.uploaded' ? 'Shared a file' : ''));
+  const clientMessageId = String(payload.client_message_id || metadata.client_message_id || '') || null;
   return {
     id: event.id,
     senderName: (payload.sender_name as string) || sourceName(event.source),
@@ -161,12 +178,15 @@ function eventToMessage(event: EventRecord): ChatMessage {
     responseRequired: Boolean(metadata.response_required),
     requiredResponses: Array.isArray(metadata.required_responses) ? metadata.required_responses as string[] : [],
     needsReply: typeof metadata.needs_reply === 'boolean' ? metadata.needs_reply : null,
-    agentReplyDepth: typeof metadata.agent_reply_depth === 'number' ? metadata.agent_reply_depth : null,
     loopGuard: typeof metadata.loop_guard === 'string' ? metadata.loop_guard : null,
     handoffState: typeof metadata.handoff_state === 'string' ? metadata.handoff_state : null,
     handoffResponses: typeof metadata.handoff_responses === 'object' && metadata.handoff_responses !== null
       ? Object.fromEntries(Object.entries(metadata.handoff_responses as Record<string, { status?: unknown }>).map(([agent, value]) => [agent, String(value?.status || '')]))
       : {},
+    targetAgents,
+    visibleOnly: rawTargets.includes('__no_response__'),
+    clientMessageId,
+    pending: false,
   };
 }
 
@@ -215,6 +235,15 @@ function timeText(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function channelTitle(channel: Channel) {
+  return channel.title?.trim() || channelName(channel.address);
+}
+
+function channelActivityText(channel: Channel) {
+  const ts = channel.last_event_at || channel.created_at || null;
+  return ts ? `Active ${timeText(ts)}` : 'No activity yet';
+}
+
 function ackLabel(status: string) {
   if (status === 'processing') return 'processing';
   if (status === 'replied') return 'replied';
@@ -225,7 +254,6 @@ function ackLabel(status: string) {
 
 function loopGuardLabel(value: string) {
   if (value === 'needs_reply_required') return 'paused: needs_reply required';
-  if (value === 'reply_budget_exceeded') return 'paused: depth budget exceeded';
   if (value === 'terminal_no_reply') return 'terminal: no reply needed';
   if (value === 'needs_reply_false') return 'terminal: needs_reply=false';
   return value.replaceAll('_', ' ');
@@ -234,7 +262,6 @@ function loopGuardLabel(value: string) {
 function defaultPolicy(): CollaborationPolicy {
   return {
     mode: 'assisted',
-    agentReplyBudget: 2,
     requireAnchoredAgentReplies: true,
     requireNeedsReplyForAgentWake: true,
     terminalStatuses: ['done', 'blocked', 'need_input', 'needs_user', 'proposal', 'failed', 'cancelled'],
@@ -252,11 +279,6 @@ function taskStatusClass(status: string) {
 
 function taskStatusLabel(status: string) {
   return status === 'needs_user' ? 'needs user' : status || 'idle';
-}
-
-function hasTerminalAck(message: ChatMessage, agentName: string) {
-  if (['replied', 'failed'].includes(message.handoffResponses[agentName])) return true;
-  return message.acks.some((ack) => ack.agentName === agentName && ['replied', 'failed'].includes(ack.status));
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -291,7 +313,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [currentChannel, setCurrentChannel] = useState<string>('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messagesByChannel, setMessagesByChannel] = useState<Record<string, ChatMessage[]>>({});
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -302,6 +324,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [connectOpen, setConnectOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
   const [editingRoom, setEditingRoom] = useState(false);
   const [savingRoomName, setSavingRoomName] = useState(false);
   const [roomNameDraft, setRoomNameDraft] = useState('');
@@ -311,8 +334,15 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const [deletingSession, setDeletingSession] = useState(false);
   const [replyDraft, setReplyDraft] = useState<ReplyTo | null>(null);
   const [retryingHandoff, setRetryingHandoff] = useState<string | null>(null);
+  const [retryCounts, setRetryCounts] = useState<Record<string, number>>({});
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const restoredScrollKeyRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const currentMessages = useMemo<ChatMessage[]>(() => messagesForChannel(messagesByChannel, currentChannel) as ChatMessage[], [messagesByChannel, currentChannel]);
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
@@ -375,7 +405,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         .filter((channel) => channel.status !== 'deleted')
         .sort((a, b) => (b.last_event_at || b.created_at || 0) - (a.last_event_at || a.created_at || 0));
       setChannels(sortedChannels);
-      const firstChannel = pickRoomChannel(sortedChannels, currentChannel, workspaceId);
+      const firstChannel = pickActiveChannel(sortedChannels, currentChannel, workspaceId, window.localStorage);
       setCurrentChannel(firstChannel);
       if (firstChannel) {
         try {
@@ -385,9 +415,11 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
       if (firstChannel) {
         const events = await apiFetch<{ events: EventRecord[] }>(`/v1/events?network=${workspaceId}&channel=${encodeURIComponent(firstChannel)}&type=workspace&sort=desc&limit=200`);
-        setMessages(eventsToMessages(events.events || []));
+        const serverMessages = eventsToMessages(events.events || []);
+        setMessagesByChannel((prev) => reconcileMessagesByChannel(pruneChannelState(prev, sortedChannels.map((channel) => channelName(channel.address))), firstChannel, serverMessages, reconcileMessages));
+        setReplyDraft((current) => restoreReplyDraft(current, serverMessages).replyDraft);
       } else {
-        setMessages([]);
+        setMessagesByChannel({});
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load session');
@@ -405,11 +437,95 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   }, [frozen, refresh, token]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length]);
+    const channel = currentChannel || '';
+    if (!channel) return;
+    try {
+      const savedDraft = window.localStorage.getItem(draftStorageKey(workspaceId, channel));
+      setDraft(savedDraft || '');
+      const savedReply = window.localStorage.getItem(replyStorageKey(workspaceId, channel));
+      setReplyDraft(savedReply ? JSON.parse(savedReply) as ReplyTo : null);
+    } catch {
+      setDraft('');
+      setReplyDraft(null);
+    }
+  }, [currentChannel, workspaceId]);
+
+  useEffect(() => {
+    const channel = currentChannel || '';
+    if (!channel) return;
+    try {
+      if (draft) window.localStorage.setItem(draftStorageKey(workspaceId, channel), draft);
+      else window.localStorage.removeItem(draftStorageKey(workspaceId, channel));
+    } catch {}
+  }, [currentChannel, draft, workspaceId]);
+
+  useEffect(() => {
+    const channel = currentChannel || '';
+    if (!channel) return;
+    try {
+      if (replyDraft) window.localStorage.setItem(replyStorageKey(workspaceId, channel), JSON.stringify(replyDraft));
+      else window.localStorage.removeItem(replyStorageKey(workspaceId, channel));
+    } catch {}
+  }, [currentChannel, replyDraft, workspaceId]);
+
+  useEffect(() => {
+    const channel = currentChannel || '';
+    const scroller = scrollRef.current;
+    if (!channel || !scroller) return;
+    const key = scrollStorageKey(workspaceId, channel);
+    if (restoredScrollKeyRef.current === key) return;
+    restoredScrollKeyRef.current = key;
+    requestAnimationFrame(() => {
+      try {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return;
+        const saved = Number(raw);
+        if (Number.isFinite(saved)) scroller.scrollTop = saved;
+      } catch {}
+    });
+  }, [currentChannel, currentMessages.length, workspaceId]);
+
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    if (!shouldStickToBottomRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: currentMessages.length > 0 ? 'smooth' : 'auto' });
+  }, [currentMessages.length]);
 
   const agentsByName = useMemo(() => new Map((room?.agents || []).map((a) => [a.agentName, a])), [room?.agents]);
   const collaborationPolicy = room?.collaborationPolicy || defaultPolicy();
+  const currentChannelMeta = useMemo(() => channels.find((channel) => channelName(channel.address) === currentChannel) || null, [channels, currentChannel]);
+  const channelCapabilitySnapshot = useMemo(() => capabilitySnapshot(currentMessages, {
+    channelOwner: currentChannelMeta?.master || null,
+    presentAgents: currentChannelMeta?.participants || [],
+    availableAgents: (room?.agents || []).map((agent) => agent.agentName),
+  }), [currentMessages, currentChannelMeta, room?.agents]);
+  const collaborationSummary = useMemo(() => collaborationSummaryFromSnapshot(channelCapabilitySnapshot, currentChannelMeta?.master || null), [channelCapabilitySnapshot, currentChannelMeta?.master]);
+  const previousChannelCapabilitySnapshot = useMemo(() => capabilitySnapshot(currentMessages.slice(0, -1), {
+    channelOwner: currentChannelMeta?.master || null,
+    presentAgents: currentChannelMeta?.participants || [],
+    availableAgents: (room?.agents || []).map((agent) => agent.agentName),
+  }), [currentMessages, currentChannelMeta, room?.agents]);
+  const presenceHistoryRow = useMemo(() => capabilityDiffSummary(previousChannelCapabilitySnapshot, channelCapabilitySnapshot), [previousChannelCapabilitySnapshot, channelCapabilitySnapshot]);
+  const composerIntent = useMemo(() => composerIntentSummary({ draft, replyDraft: replyDraft ? { type: replyDraft.type, sender: replyDraft.sender, text: replyDraft.text } : undefined, failedAgent: collaborationSummary.failedAgent, availableAgents: (room?.agents || []).map((agent) => agent.agentName) }), [draft, replyDraft, collaborationSummary.failedAgent, room?.agents]);
+  const sendBlockedByRecoveryTarget = composerIntent?.mode === 'recovery' && composerIntent.requiresExplicitTarget && !composerIntent.targetAgent;
+  const attachmentIntent = useMemo(() => attachmentIntentEnvelope({ composerIntent, replyDraft }), [composerIntent, replyDraft]);
+
+  const focusComposer = useCallback((prefill?: string) => {
+    if (typeof prefill === 'string') {
+      setDraft((current) => {
+        const next = current.trim().length === 0 ? prefill : `${current}${current.endsWith(' ') ? '' : ' '}${prefill}`;
+        return next;
+      });
+    }
+    shouldStickToBottomRef.current = true;
+    requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      const value = composerRef.current?.value?.length || 0;
+      composerRef.current?.setSelectionRange?.(value, value);
+    });
+  }, []);
 
   const retryHandoff = async (message: ChatMessage, agentName: string) => {
     if (retryingHandoff || frozen) return;
@@ -426,6 +542,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           metadata: { source: 'session-ui' },
         }),
       });
+      setRetryCounts((prev) => ({ ...prev, [`${message.id}:${agentName}`]: (prev[`${message.id}:${agentName}`] || 0) + 1 }));
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to retry ${agentName}`);
@@ -502,13 +619,14 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
   const sendMessage = async () => {
     const content = draft.trim();
-    if (!content || !currentChannel || sending || frozen) return;
+    if (!content || !currentChannel || sending || frozen || attachmentIntent.blocked) return;
     setSending(true);
-    setDraft('');
+    const clientMessageId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const replyTo = replyDraft;
-    setReplyDraft(null);
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {}, needsReply: null, agentReplyDepth: null, loopGuard: null, handoffState: null };
-    setMessages((prev) => [...prev, optimistic]);
+    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {}, needsReply: null, loopGuard: null, handoffState: null, targetAgents: [], visibleOnly: false, clientMessageId, pending: true };
+    setMessagesByChannel((prev) => appendMessageForChannel(prev, currentChannel, optimistic));
     try {
       await apiFetch('/v1/events', {
         method: 'POST',
@@ -517,11 +635,13 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           type: 'workspace.message.posted',
           source: 'human:user',
           target: `channel/${currentChannel}`,
-          payload: { content, sender_type: 'human', ...(replyTo ? { reply_to: replyTo } : {}) },
-          metadata: replyTo ? { reply_to: replyTo.id } : {},
+          payload: { content, sender_type: 'human', client_message_id: clientMessageId, ...(replyTo ? { reply_to: replyTo } : {}) },
+          metadata: { ...(replyTo ? { reply_to: replyTo.id } : {}), ...(attachmentIntent.targetAgents.length ? { target_agents: attachmentIntent.targetAgents } : {}), client_message_id: clientMessageId },
           visibility: 'channel',
         }),
       });
+      setDraft('');
+      setReplyDraft(null);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message');
@@ -543,7 +663,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
   const uploadFiles = async (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
-    if (!files.length || !currentChannel || uploading || frozen) return;
+    if (!files.length || !currentChannel || uploading || frozen || attachmentIntent.blocked) return;
     setUploading(true);
     setError(null);
     try {
@@ -553,6 +673,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         formData.append('network', workspaceId);
         formData.append('channel_name', currentChannel);
         formData.append('source', 'human:user');
+        if (attachmentIntent.replyToId) formData.append('reply_to', attachmentIntent.replyToId);
+        if (attachmentIntent.targetAgents.length) formData.append('target_agents', JSON.stringify(attachmentIntent.targetAgents));
         const res = await fetch(`${API_URL}/v1/files`, {
           method: 'POST',
           headers: token ? { 'X-Workspace-Token': token } : {},
@@ -621,6 +743,13 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  const switchChannel = (next: string) => {
+    setCurrentChannel(next);
+    restoredScrollKeyRef.current = null;
+    setLoading(true);
+    try { window.localStorage.setItem(`agentBridgeCurrentChannel:${workspaceId}`, next); } catch {}
+  };
+
   const deleteCurrentSession = async () => {
     if (!currentChannel || deletingSession) return;
     const current = channels.find((channel) => channelName(channel.address) === currentChannel);
@@ -634,7 +763,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       setChannels(remaining);
       const next = remaining[0]?.address ? channelName(remaining[0].address) : '';
       setCurrentChannel(next);
-      setMessages([]);
+      setMessagesByChannel((prev) => pruneChannelState(prev, next ? [next, ...remaining.map((channel) => channelName(channel.address))] : remaining.map((channel) => channelName(channel.address))));
       if (next) {
         try { window.localStorage.setItem(`agentBridgeCurrentChannel:${workspaceId}`, next); } catch {}
       }
@@ -646,6 +775,27 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  const renderChannelButton = (channel: Channel) => {
+    const name = channelName(channel.address);
+    const active = name === currentChannel;
+    return (
+      <button
+        key={channel.address}
+        onClick={() => switchChannel(name)}
+        className={active ? 'w-full rounded-xl border border-cyan-300/40 bg-cyan-300/12 px-3 py-2 text-left ring-1 ring-cyan-300/30' : 'w-full rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-left hover:border-cyan-300/30'}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <p className={active ? 'truncate text-sm font-semibold text-cyan-50' : 'truncate text-sm font-semibold text-slate-100'}>{channelTitle(channel)}</p>
+          {active && <span className="rounded-full bg-cyan-300/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-100">Open</span>}
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
+          <span className="truncate">{name}</span>
+          <span className="shrink-0">{channelActivityText(channel)}</span>
+        </div>
+      </button>
+    );
+  };
+
   const renderAgentCard = (agent: Agent) => (
     <div key={agent.agentName} className="rounded-xl bg-slate-900/80 p-3">
       <div className="flex items-start justify-between gap-2">
@@ -655,8 +805,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           ) : (
             <p className="truncate text-sm font-semibold">{agentLabel(agent)}</p>
           )}
-          <p className="truncate text-xs text-slate-500">id: {agent.agentName}</p>
-          <p className="mt-1 text-xs text-slate-400">{agent.agentType || 'agent'} · {agent.status}</p>
+          <p className="truncate text-xs text-slate-400">{roleSubtitle(agent.role) || (agent.agentType || 'Agent')}</p>
+          {showDebug && <p className="truncate text-[11px] text-slate-600">id: {agent.agentName}</p>}
+          <p className="mt-1 text-xs text-slate-500">{agent.agentType || 'agent'} · {agent.status}</p>
         </div>
       </div>
       <div className="mt-3 rounded-xl border border-white/10 bg-slate-950/70 p-2">
@@ -712,8 +863,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           </div>
           <div className="space-y-1.5 text-slate-300">
             <div className="flex justify-between gap-3"><span>Mode</span><span className="font-medium text-white">{collaborationPolicy.mode}</span></div>
-            <div className="flex justify-between gap-3"><span>Agent depth</span><span className="font-medium text-white">{collaborationPolicy.agentReplyBudget}</span></div>
-            <div className="flex justify-between gap-3"><span>Wake rule</span><span className="font-medium text-white">{collaborationPolicy.requireNeedsReplyForAgentWake ? 'needs_reply=true' : 'implicit allowed'}</span></div>
+            <div className="flex justify-between gap-3"><span>Manager</span><span className="font-medium text-white">{collaborationPolicy.sessionManagerAgent || room?.agents.find((agent) => ['session_manager', 'manager', 'conductor'].includes(agent.role))?.agentName || 'not set'}</span></div>
+            <div className="flex justify-between gap-3"><span>Wake rule</span><span className="font-medium text-white">{collaborationPolicy.requireNeedsReplyForAgentWake ? 'structured handoff' : 'implicit allowed'}</span></div>
             <div className="flex justify-between gap-3"><span>Anchors</span><span className="font-medium text-white">{collaborationPolicy.requireAnchoredAgentReplies ? 'required' : 'optional'}</span></div>
             <div className="flex justify-between gap-3"><span>Loop guard</span><span className="font-medium text-white">{collaborationPolicy.loopGuardEnabled ? 'on' : 'off'}</span></div>
           </div>
@@ -721,6 +872,17 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
             {collaborationPolicy.terminalStatuses.map((status) => (
               <span key={status} className="rounded-full bg-slate-950/70 px-2 py-0.5 text-[10px] text-slate-300">{status}</span>
             ))}
+          </div>
+        </div>
+
+        <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold">Sessions</h2>
+            <span className="text-xs text-slate-500">{channels.length}</span>
+          </div>
+          <div className="space-y-2">
+            {channels.map(renderChannelButton)}
+            {!channels.length && <p className="text-sm text-slate-500">No sessions yet.</p>}
           </div>
         </div>
 
@@ -750,7 +912,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                 <Edit3 className="size-4 text-slate-600 group-hover:text-cyan-200" />
               </button>
             )}
-            <p className="text-xs text-slate-500">One shared session for humans and agents.</p>
+            <p className="text-xs text-slate-500">Current session: {currentChannelMeta ? channelTitle(currentChannelMeta) : 'None selected'}</p>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={() => setConnectOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 lg:hidden"><Plus className="size-4" /> Add agent</button>
@@ -767,56 +929,83 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
         {error && <div className="shrink-0 border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-sm text-rose-100">{error}</div>}
         {frozen && <div className="shrink-0 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">Session is frozen. Humans and agents cannot send chat messages until you unfreeze.</div>}
 
-        <div className="shrink-0 border-b border-cyan-300/10 bg-cyan-300/[0.06] px-4 py-2 text-xs text-slate-300">
-          <span className="font-semibold text-cyan-100">Policy:</span> {collaborationPolicy.mode} · depth {collaborationPolicy.agentReplyBudget} · wake on {collaborationPolicy.requireNeedsReplyForAgentWake ? 'needs_reply=true' : 'implicit replies'} · terminals {collaborationPolicy.terminalStatuses.join(', ')}
-        </div>
+        {showDebug && (
+          <div className="shrink-0 border-b border-cyan-300/10 bg-cyan-300/[0.06] px-4 py-2 text-xs text-slate-300">
+            <span className="font-semibold text-cyan-100">Policy:</span> {collaborationPolicy.mode} · manager {collaborationPolicy.sessionManagerAgent || room?.agents.find((agent) => ['session_manager', 'manager', 'conductor'].includes(agent.role))?.agentName || 'not set'} · wake on {collaborationPolicy.requireNeedsReplyForAgentWake ? 'structured handoff' : 'implicit replies'} · terminals {collaborationPolicy.terminalStatuses.join(', ')}
+          </div>
+        )}
 
         <div className="shrink-0 border-b border-white/10 bg-slate-950/90 px-4 py-3 lg:hidden">
-          <details className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
-            <summary className="cursor-pointer text-sm font-semibold text-slate-100">Manage agents ({room?.agents?.length || 0})</summary>
-            <div className="mt-3 grid gap-2">
-              {(room?.agents || []).map(renderAgentCard)}
-              {!room?.agents?.length && <p className="text-sm text-slate-500">No agents connected. New sessions start empty — use Add agent when you want one to join.</p>}
-            </div>
-          </details>
+          <div className="grid gap-3">
+            <details className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-100">Sessions ({channels.length})</summary>
+              <div className="mt-3 grid gap-2">
+                {channels.map(renderChannelButton)}
+                {!channels.length && <p className="text-sm text-slate-500">No sessions yet.</p>}
+              </div>
+            </details>
+            <details className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-100">Manage agents ({room?.agents?.length || 0})</summary>
+              <div className="mt-3 grid gap-2">
+                {(room?.agents || []).map(renderAgentCard)}
+                {!room?.agents?.length && <p className="text-sm text-slate-500">No agents connected. New sessions start empty — use Add agent when you want one to join.</p>}
+              </div>
+            </details>
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5">
-          {loading && messages.length === 0 ? (
+        <div
+          ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+            shouldStickToBottomRef.current = distanceFromBottom < 80;
+            if (!currentChannel) return;
+            try { window.localStorage.setItem(scrollStorageKey(workspaceId, currentChannel), String(el.scrollTop)); } catch {}
+          }}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5">
+          {loading && currentMessages.length === 0 ? (
             <div className="flex h-full items-center justify-center text-slate-500"><Loader2 className="mr-2 size-5 animate-spin" /> Loading session…</div>
-          ) : messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center text-slate-500">
+          ) : currentMessages.length === 0 ? (
+            <div className="mx-auto flex h-full max-w-xl flex-col items-center justify-center text-center text-slate-300">
               <Bot className="mb-4 size-12 opacity-30" />
-              <p className="text-lg font-medium text-slate-300">No messages yet</p>
-              <p className="mt-1 text-sm">Say something, or add another agent to start the session.</p>
+              <p className="text-lg font-medium text-white">One shared thread for humans and agents.</p>
+              <p className="mt-2 text-sm text-slate-400">{collaborationSummary.owner === 'unassigned' ? 'No agent owns the thread yet.' : `${collaborationSummary.owner} can act now.`} Start with one clear request or invite an agent first.</p>
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <button onClick={() => focusComposer('Review this thread and tell me the next best step.')} disabled={frozen || !currentChannel} className="rounded-2xl bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">Start thread</button>
+                <button onClick={() => setConnectOpen(true)} className="rounded-2xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-cyan-300/40">Invite agent</button>
+              </div>
+              <p className="mt-3 text-xs text-slate-500">Example: “Review the last deployment and tell me what to fix next.”</p>
             </div>
           ) : (
-            <div className="mx-auto max-w-4xl space-y-4">
-              {messages.map((message) => {
+            <div className="mx-auto max-w-4xl space-y-3">
+              {currentMessages.map((message: ChatMessage) => {
                 const agent = agentsByName.get(message.senderName);
                 const label = message.senderType === 'human' ? 'You' : agent ? agentLabel(agent) : message.senderName;
                 return (
-                  <div key={message.id} id={`message-${message.id}`} className="group flex gap-3 scroll-mt-20">
-                    <div className={message.senderType === 'human' ? 'flex size-9 shrink-0 items-center justify-center rounded-2xl bg-slate-700' : 'flex size-9 shrink-0 items-center justify-center rounded-2xl bg-cyan-300 text-slate-950'}>
+                  <div key={message.id}>
+                    <div id={`message-${message.id}`} className="group flex gap-2.5 scroll-mt-20">
+                      <div className={message.senderType === 'human' ? 'flex size-8 shrink-0 items-center justify-center rounded-2xl bg-slate-700' : 'flex size-8 shrink-0 items-center justify-center rounded-2xl bg-cyan-300 text-slate-950'}>
                       {message.senderType === 'human' ? <User className="size-4" /> : <Bot className="size-4" />}
                     </div>
-                    <div className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.045] px-4 py-3">
-                      <div className="mb-1 flex items-center gap-2">
+                    <div className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/[0.045] px-3.5 py-2.5">
+                      <div className="mb-0.5 flex items-center gap-2">
                         <span className="font-semibold text-white">{label}</span>
-                        {agent && <span className="text-xs text-slate-500">id: {agent.agentName}</span>}
+                        {agent && roleSubtitle(agent.role) && <span className="text-xs text-slate-400">{roleSubtitle(agent.role)}</span>}
+                        {showDebug && agent && <span className="text-[11px] text-slate-600">id: {agent.agentName}</span>}
                         {message.replyTo && <span className="rounded-full bg-cyan-300/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-100">reply</span>}
                         <span className="ml-auto text-xs text-slate-600">{timeText(message.timestamp)}</span>
                         <button onClick={() => beginReply(message)} className="rounded-lg p-1 text-slate-500 opacity-0 transition hover:bg-white/10 hover:text-cyan-100 group-hover:opacity-100" title="Reply to this message"><Reply className="size-4" /></button>
                       </div>
                       {message.replyTo && (
-                        <button onClick={() => document.getElementById(`message-${message.replyTo?.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="mb-3 block max-w-full rounded-xl border-l-2 border-cyan-300/70 bg-slate-950/70 px-3 py-2 text-left text-xs text-slate-400 hover:text-slate-200">
+                        <button onClick={() => document.getElementById(`message-${message.replyTo?.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="mb-2 block max-w-full rounded-xl border-l-2 border-cyan-300/70 bg-slate-950/70 px-3 py-2 text-left text-xs text-slate-400 hover:text-slate-200">
                           <span className="block font-semibold text-cyan-100">Replying to {sourceName(message.replyTo.sender || message.replyTo.type || 'message')}</span>
                           <span className="line-clamp-2 break-words">{message.replyTo.text || 'message'}</span>
                         </button>
                       )}
-                      {message.content && <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">{message.content}</p>}
+                      {message.content && <p className="whitespace-pre-wrap break-words text-sm leading-5 text-slate-200">{message.content}</p>}
                       {message.attachments.length > 0 && (
-                        <div className="mt-3 grid gap-2">
+                        <div className="mt-2 grid gap-2">
                           {message.attachments.map((file) => (
                             <a key={file.fileId} href={fileUrl(file.fileId)} target="_blank" rel="noreferrer" className="flex items-center gap-3 rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-200 hover:border-cyan-300/50 hover:text-white">
                               <FileText className="size-4 shrink-0 text-cyan-200" />
@@ -827,8 +1016,22 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                           ))}
                         </div>
                       )}
+                      {((((collaborationPolicy.mode !== 'manager' && collaborationPolicy.mode !== 'manager_led') && (message.targetAgents.length > 0 && message.targetAgents.some((agentName) => agentName !== channelCapabilitySnapshot.ownerAgent)) && !(message.responseRequired && message.requiredResponses.length > 0))) || (message.visibleOnly && message.senderType === 'agent')) && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {(collaborationPolicy.mode !== 'manager' && collaborationPolicy.mode !== 'manager_led') && message.targetAgents.length > 0 && message.targetAgents.some((agentName) => agentName !== channelCapabilitySnapshot.ownerAgent) && !(message.responseRequired && message.requiredResponses.length > 0) ? (
+                            <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-0.5 text-[11px] text-cyan-100">
+                              actionable → {message.targetAgents.join(', ')}
+                            </span>
+                          ) : null}
+                          {message.visibleOnly && message.senderType === 'agent' ? (
+                            <span className="rounded-full border border-slate-400/20 bg-slate-400/10 px-2 py-0.5 text-[11px] text-slate-300">
+                              visible only
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
                       {message.acks.length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
+                        <div className="mt-2 flex flex-wrap gap-1.5">
                           {message.acks.map((ack) => (
                             <span key={`${message.id}-${ack.agentName}`} className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-400">
                               {ack.agentName}: {ackLabel(ack.status)}
@@ -836,46 +1039,37 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                           ))}
                         </div>
                       )}
-                      {Object.keys(message.handoffResponses).length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
+                      {Object.values(message.handoffResponses).some((status) => status === 'queued' || status === 'processing') && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
                           {Object.entries(message.handoffResponses).map(([agentName, status]) => {
-                            const retryKey = `${message.id}:${agentName}`;
-                            const failed = status === 'failed';
+                            if (status !== 'queued' && status !== 'processing') return null;
                             return (
-                              <span key={`${message.id}-handoff-${agentName}`} className={failed ? 'inline-flex items-center gap-1.5 rounded-full border border-rose-300/20 bg-rose-300/10 px-2 py-0.5 text-[11px] text-rose-100' : status === 'queued' || status === 'processing' ? 'inline-flex items-center gap-1.5 rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'inline-flex items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
+                              <span key={`${message.id}-handoff-${agentName}`} className="inline-flex items-center gap-1.5 rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100">
                                 <span>{agentName}: {status || 'pending'}</span>
-                                {failed && (
-                                  <button disabled={Boolean(retryingHandoff) || frozen} onClick={() => retryHandoff(message, agentName)} className="rounded-full border border-rose-200/30 px-1.5 py-0.5 text-[10px] font-semibold hover:bg-rose-200/10 disabled:cursor-not-allowed disabled:opacity-50">
-                                    {retryingHandoff === retryKey ? 'retrying…' : 'retry'}
-                                  </button>
-                                )}
                               </span>
                             );
                           })}
                         </div>
                       )}
-                      {(message.needsReply !== null || message.agentReplyDepth !== null || message.loopGuard || message.handoffState) && (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
+                      {showDebug && (message.needsReply !== null || message.loopGuard || message.handoffState) && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
                           {message.needsReply !== null && (
                             <span className={message.needsReply ? 'rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-0.5 text-[11px] text-cyan-100' : 'rounded-full border border-slate-400/20 bg-slate-400/10 px-2 py-0.5 text-[11px] text-slate-300'}>
                               needs_reply={String(message.needsReply)}
                             </span>
                           )}
-                          {message.agentReplyDepth !== null && (
-                            <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2 py-0.5 text-[11px] text-violet-100">depth {message.agentReplyDepth}/{collaborationPolicy.agentReplyBudget}</span>
-                          )}
                           {message.handoffState && (
                             <span className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-300">handoff {message.handoffState}</span>
                           )}
                           {message.loopGuard && (
-                            <span className={message.loopGuard === 'reply_budget_exceeded' || message.loopGuard === 'needs_reply_required' ? 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
+                            <span className={message.loopGuard === 'needs_reply_required' ? 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
                               {loopGuardLabel(message.loopGuard)}
                             </span>
                           )}
                         </div>
                       )}
                       {message.responseRequired && message.requiredResponses.length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
+                        <div className="mt-2 flex flex-wrap gap-1.5">
                           {message.requiredResponses.map((agentName) => {
                             const done = hasTerminalAck(message, agentName);
                             return (
@@ -888,6 +1082,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                       )}
                     </div>
                   </div>
+                </div>
                 );
               })}
               <div ref={bottomRef} />
@@ -897,23 +1092,86 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
 
         <div className="shrink-0 border-t border-white/10 bg-slate-950 p-4">
           <div className="mx-auto max-w-4xl">
-            {replyDraft && (
+            {presenceHistoryRow && (
+              <div className="mb-3 rounded-full border border-white/10 bg-slate-900/60 px-3 py-1 text-[11px] text-slate-400">{presenceHistoryRow}</div>
+            )}
+            <div className="mb-3 rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3 text-sm text-slate-200">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span><span className="text-slate-500">Owner:</span> <span className="font-medium text-white">{collaborationSummary.owner}</span></span>
+                <span><span className="text-slate-500">State:</span> <span className={collaborationSummary.status === 'blocked' ? 'font-medium text-rose-200' : collaborationSummary.status === 'waiting' ? 'font-medium text-amber-200' : 'font-medium text-slate-200'}>{collaborationSummary.label}</span></span>
+                {collaborationSummary.waitingOn.length > 0 && (
+                  <span><span className="text-slate-500">Waiting on:</span> <span className="font-medium text-white">{collaborationSummary.waitingOn.join(', ')}</span></span>
+                )}
+                {collaborationSummary.lastHandoffAt && (
+                  <span><span className="text-slate-500">Last handoff:</span> <span className="font-medium text-white">{timeText(collaborationSummary.lastHandoffAt)}</span></span>
+                )}
+              </div>
+              <div className="mt-2 text-sm text-slate-300">
+                <span className="text-slate-500">Next step:</span> {collaborationSummary.nextStep}
+              </div>
+              <div className="mt-1 text-sm text-slate-400">
+                <span className="text-slate-500">Why:</span> {collaborationSummary.reason}
+              </div>
+              {collaborationSummary.status === 'blocked' && collaborationSummary.failedAgent && collaborationSummary.failedMessageId && (() => {
+                const retryKey = `${collaborationSummary.failedMessageId}:${collaborationSummary.failedAgent}`;
+                const retryCount = retryCounts[retryKey] || 0;
+                const mentionPrefill = alternateAgentRecoveryPrefill(collaborationSummary.failedAgent);
+                const retryButton = (
+                  <button
+                    disabled={Boolean(retryingHandoff) || frozen}
+                    onClick={() => {
+                      const failedMessage = currentMessages.find((message: ChatMessage) => message.id === collaborationSummary.failedMessageId);
+                      if (failedMessage) retryHandoff(failedMessage, collaborationSummary.failedAgent!);
+                    }}
+                    className="rounded-xl border border-rose-300/30 bg-rose-300/10 px-3 py-1.5 text-sm font-semibold text-rose-100 hover:bg-rose-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {retryingHandoff === retryKey ? 'Retrying…' : 'Retry handoff'}
+                  </button>
+                );
+                const replyButton = (
+                  <button
+                    disabled={frozen || !currentChannel}
+                    onClick={() => focusComposer()}
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm font-semibold text-slate-200 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Reply yourself
+                  </button>
+                );
+                const mentionButton = (
+                  <button
+                    disabled={frozen || !currentChannel}
+                    onClick={() => focusComposer(mentionPrefill)}
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm font-semibold text-slate-200 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Try another agent
+                  </button>
+                );
+                return (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {retryCount > 0 ? replyButton : retryButton}
+                    {retryCount > 0 ? retryButton : replyButton}
+                    {mentionButton}
+                  </div>
+                );
+              })()}
+            </div>
+            {composerIntent && (
               <div className="mb-2 flex items-center gap-3 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-3 py-2 text-sm text-cyan-50">
                 <Reply className="size-4 shrink-0" />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-cyan-100">Replying to {sourceName(replyDraft.sender || replyDraft.type || 'message')}</div>
-                  <div className="truncate text-slate-200">{replyDraft.text || 'message'}</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-cyan-100">{composerIntent.label}</div>
+                  <div className="truncate text-slate-200">{composerIntent.detail}</div>
                 </div>
-                <button onClick={() => setReplyDraft(null)} className="rounded-lg p-1 text-cyan-100 hover:bg-white/10"><X className="size-4" /></button>
+                {replyDraft && <button onClick={() => setReplyDraft(null)} className="rounded-lg p-1 text-cyan-100 hover:bg-white/10"><X className="size-4" /></button>}
               </div>
             )}
             <div className="flex gap-2">
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => uploadFiles(e.currentTarget.files)} />
-            <button onClick={() => fileInputRef.current?.click()} disabled={frozen || uploading || !currentChannel} className="rounded-2xl border border-white/10 px-4 text-slate-300 hover:border-cyan-300/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" title="Attach files">
+            <button onClick={() => fileInputRef.current?.click()} disabled={frozen || uploading || !currentChannel || attachmentIntent.blocked} className="rounded-2xl border border-white/10 px-4 text-slate-300 hover:border-cyan-300/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-50" title={attachmentIntent.blocked ? 'Choose a new target first' : 'Attach files'}>
               {uploading ? <Loader2 className="size-5 animate-spin" /> : <Paperclip className="size-5" />}
             </button>
-            <textarea disabled={frozen || !currentChannel} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }} placeholder={frozen ? 'Chat is frozen' : 'Type a message…'} className="max-h-40 min-h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4 disabled:opacity-50" />
-            <button onClick={sendMessage} disabled={frozen || sending || !draft.trim()} className="rounded-2xl bg-cyan-300 px-4 font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"><Send className="size-5" /></button>
+            <textarea ref={composerRef} disabled={frozen || !currentChannel} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }} placeholder={frozen ? 'Chat is frozen' : 'Type a message…'} className="max-h-40 min-h-12 flex-1 resize-none rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm outline-none ring-cyan-300/0 transition focus:ring-4 disabled:opacity-50" />
+            <button onClick={sendMessage} disabled={frozen || sending || !draft.trim() || sendBlockedByRecoveryTarget} title={sendBlockedByRecoveryTarget ? 'Choose a new target first' : 'Send'} className="rounded-2xl bg-cyan-300 px-4 font-semibold text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"><Send className="size-5" /></button>
             </div>
           </div>
         </div>
@@ -924,8 +1182,8 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
           <div className="w-full max-w-lg rounded-3xl border border-white/10 bg-slate-950 p-6 shadow-2xl">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">Add agent</h2>
-                <p className="mt-1 text-sm text-slate-400">Copy one invite. Paste it to the other agent with the repo you want it to use.</p>
+                <h2 className="text-xl font-semibold">Invite agent</h2>
+                <p className="mt-1 text-sm text-slate-400">Copy one invite, send it to another agent, then ask that agent to work in this thread.</p>
               </div>
               <button onClick={() => setConnectOpen(false)} className="rounded-xl p-2 text-slate-400 hover:bg-white/10 hover:text-white"><X className="size-5" /></button>
             </div>
@@ -933,7 +1191,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
             <div className="space-y-3">
               <button onClick={copyAgentInvite} className="flex w-full items-center justify-center gap-3 rounded-2xl bg-cyan-300 px-4 py-4 text-base font-semibold text-slate-950 hover:bg-cyan-200">
                 {copied ? <Check className="size-5" /> : <Copy className="size-5" />}
-                {copied ? 'Copied invite' : copyFailed ? 'Select text below' : 'Copy agent invite'}
+                {copied ? 'Copied invite' : copyFailed ? 'Select text below' : 'Copy invite'}
               </button>
               {copyFailed && (
                 <p className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-sm text-amber-100">
@@ -942,13 +1200,11 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
               )}
 
               <div className="rounded-2xl bg-black/35 p-4 text-sm leading-6 text-slate-300 ring-1 ring-white/10">
-                <p className="mb-2 font-semibold text-slate-100">What to do:</p>
+                <p className="mb-2 font-semibold text-slate-100">How it works</p>
                 <ol className="list-decimal space-y-1 pl-5">
-                  <li>Click <span className="text-cyan-100">Copy agent invite</span>.</li>
-                  <li>Paste it to the agent.</li>
-                  <li>Give that agent the repo/path.</li>
-                  <li>The agent joins and says hello here.</li>
-                  <li>Tell it to answer and post progress in this session.</li>
+                  <li>Click <span className="text-cyan-100">Copy invite</span>.</li>
+                  <li>Paste it to the other agent with the repo or path it should use.</li>
+                  <li>Ask it to reply and post progress in this thread.</li>
                 </ol>
               </div>
 
@@ -957,7 +1213,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                 <textarea readOnly value={agentInviteText} onFocus={(e) => e.currentTarget.select()} className="mt-3 h-40 w-full resize-none rounded-xl border border-white/10 bg-slate-900 p-3 font-mono text-xs text-slate-200 outline-none focus:border-cyan-300/60" />
               </details>
 
-              <p className="text-sm text-slate-400">When the agent connects, it appears in the left agent list for this session. Rename it with the pencil icon if needed.</p>
+              <p className="text-sm text-slate-400">When it joins, it appears in the agent list for this session. You can rename it later if you want.</p>
             </div>
           </div>
         </div>

@@ -130,6 +130,22 @@ class TestSendEvent:
         data = resp.json()["data"]
         assert data["metadata"]["custom_key"] == "custom_value"
 
+    def test_explicit_target_agents_are_preserved_as_privileged_routing_input(self, client, workspace):
+        """Trusted explicit target_agents are preserved and not recomputed from transcript text."""
+        channel_name = workspace["channel"]["name"]
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "hello master, but route this to reviewer"},
+            "metadata": {"target_agents": ["reviewer"]},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["target_agents"] == ["reviewer"]
+
     def test_agent_chat_without_reply_to_is_auto_anchored(self, client, workspace):
         """Legacy agent chat is auto-anchored to the message that targeted it."""
         channel_name = workspace["channel"]["name"]
@@ -169,8 +185,8 @@ class TestSendEvent:
         assert reply["payload"]["reply_to"]["id"] == anchor_id
         assert reply["payload"]["reply_to"]["text"] == "Question for the agent"
 
-    def test_agent_message_never_targets_itself(self, client, workspace):
-        """Agent messages mentioning themselves should not create self-loop targets."""
+    def test_agent_message_without_handoff_does_not_wake_teammate(self, client, workspace):
+        """Plain agent chat does not wake teammates without structured handoff metadata."""
         for name in ["reviewer", "agent.alpha"]:
             client.post("/v1/join", json={
                 "agent_name": name,
@@ -192,9 +208,9 @@ class TestSendEvent:
         }, headers={"X-Workspace-Token": workspace["token"]})
 
         assert resp.status_code == 200
-        targets = resp.json()["data"]["metadata"]["target_agents"]
-        assert "agent.alpha" not in targets
-        assert "reviewer" in targets
+        metadata = resp.json()["data"]["metadata"]
+        assert metadata["target_agents"] == ["__no_response__"]
+        assert metadata["loop_guard"] == "needs_reply_required"
 
     def test_human_message_routes_to_master(self, client, workspace):
         """Human messages are routed to the channel master agent."""
@@ -321,8 +337,8 @@ class TestSendEvent:
         assert resp.status_code == 400
         assert "runtime_failure_message" in resp.json()["message"]
 
-    def test_member_message_without_mentions_routes_to_master(self, client, workspace):
-        """Member agent messages without mentions route back to channel master."""
+    def test_member_message_without_handoff_does_not_route_to_master(self, client, workspace):
+        """Member agent chat does not bounce to the master without structured handoff."""
         # Add a member agent
         client.post("/v1/join", json={
             "agent_name": "agent-beta",
@@ -342,11 +358,11 @@ class TestSendEvent:
 
         assert resp.status_code == 200
         data = resp.json()["data"]
-        # Member's response should be routed back to the master
-        assert data["metadata"]["target_agents"] == ["agent-alpha"]
+        assert data["metadata"]["target_agents"] == ["__no_response__"]
+        assert data["metadata"]["loop_guard"] == "needs_reply_required"
 
-    def test_member_message_with_mention_routes_to_mentioned_agent(self, client, workspace):
-        """Agent messages with explicit @mentions route to the mentioned agent."""
+    def test_member_message_with_mention_still_requires_structured_handoff(self, client, workspace):
+        """An agent @mention alone is not enough; structured handoff is required."""
         # Add member agents to workspace (not to channel — so channel stays single-participant)
         for name in ["agent-beta", "agent-gamma"]:
             client.post("/v1/join", json={
@@ -367,11 +383,11 @@ class TestSendEvent:
 
         assert resp.status_code == 200
         data = resp.json()["data"]
-        # Explicit @mention routes directly to the mentioned agent
-        assert data["metadata"]["target_agents"] == ["agent-gamma"]
+        assert data["metadata"]["target_agents"] == ["__no_response__"]
+        assert data["metadata"]["loop_guard"] == "needs_reply_required"
 
-    def test_human_direct_address_routes_to_joined_agent_name(self, client, workspace):
-        """Natural addressing uses the actual joined session agent id."""
+    def test_human_bare_direct_address_falls_back_to_master(self, client, workspace):
+        """Bare human naming does not retarget; without @mention it falls back to the master."""
         client.post("/v1/join", json={
             "agent_name": "reviewer",
             "token": workspace["token"],
@@ -389,7 +405,7 @@ class TestSendEvent:
 
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert data["metadata"]["target_agents"] == ["reviewer"]
+        assert data["metadata"]["target_agents"] == ["agent-alpha"]
 
     def test_human_mention_supports_dotted_agent_ids(self, client, workspace):
         """@agent.alpha should target the joined agent.alpha identity, not truncate at the dot."""
@@ -412,8 +428,8 @@ class TestSendEvent:
         data = resp.json()["data"]
         assert data["metadata"]["target_agents"] == ["agent.alpha"]
 
-    def test_human_multi_name_message_targets_all_named_joined_agents(self, client, workspace):
-        """Naming two session agents in plain text targets both delivery identities."""
+    def test_human_bare_names_do_not_wake_multiple_agents(self, client, workspace):
+        """Bare agent names do not wake agents; human routing must use explicit @mentions."""
         for name in ["reviewer", "agent.alpha"]:
             client.post("/v1/join", json={
                 "agent_name": name,
@@ -432,7 +448,7 @@ class TestSendEvent:
 
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert set(data["metadata"]["target_agents"]) == {"reviewer", "agent.alpha"}
+        assert data["metadata"]["target_agents"] == ["agent-alpha"]
 
     def test_human_display_name_alias_routes_to_stable_agent_name(self, client, workspace):
         """Display labels are aliases, but delivery still uses stable agent_name."""
@@ -830,12 +846,13 @@ class TestAgentInbox:
 
     def test_agent_inbox_filters_mixed_room_transcript(self, client, workspace):
         channel_name = workspace["channel"]["name"]
-        # Noise: unrelated human message, ack, self-message, other-agent target.
+        # Noise: unrelated human message for another agent, self-message, other-agent target.
         client.post("/v1/events", json={
             "type": "workspace.message.posted",
             "source": "human:user",
             "target": f"channel/{channel_name}",
             "payload": {"content": "general chat"},
+            "metadata": {"target_agents": ["reviewer"]},
             "network": workspace["id"],
         }, headers={"X-Workspace-Token": workspace["token"]})
         client.post("/v1/events", json={
@@ -899,3 +916,201 @@ class TestAgentInbox:
         )
         assert inbox.status_code == 200
         assert inbox.json()["data"]["events"] == []
+
+class TestManagerModeRouting:
+    def _enable_manager_mode(self, client, workspace, active_task="Ship release"):
+        resp = client.patch(f"/v1/workspaces/{workspace["id"]}", json={
+            "settings": {
+                "agent_collaboration_mode": "manager",
+                "session_manager_agent": "manager-bot",
+                "active_task": active_task,
+            },
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        for name, role in [("manager-bot", "session_manager"), ("worker-bot", "member")]:
+            join = client.post("/v1/join", json={
+                "agent_name": name,
+                "token": workspace["token"],
+                "network": workspace["id"],
+            })
+            assert join.status_code == 200
+            patch = client.patch(
+                f"/v1/workspaces/{workspace["id"]}/members/{name}",
+                json={"role": role},
+                headers={"X-Workspace-Token": workspace["token"]},
+            )
+            assert patch.status_code == 200
+        return workspace["channel"]["name"]
+
+    def test_assign_to_worker_is_actionable_without_semantic_handoff_fields(self, client, workspace):
+        channel_name = self._enable_manager_mode(client, workspace)
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Manager thread")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:manager-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot handle the release", "reply_to": anchor_id},
+            "metadata": {"needs_reply": True},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["metadata"]["target_agents"] == ["worker-bot"]
+        assert data["metadata"]["response_required"] is True
+        assert data["metadata"]["active_task"] == "Ship release"
+        assert "required_responses" not in data["metadata"]
+        assert "handoff_state" not in data["metadata"]
+
+        inbox = client.get(
+            "/v1/agents/worker-bot/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert [event["id"] for event in inbox.json()["data"]["events"]] == [data["id"]]
+
+    def test_worker_reply_and_complete_clear_actionable_and_keep_manager_target(self, client, workspace):
+        channel_name = self._enable_manager_mode(client, workspace)
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Manager thread")
+        assign = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:manager-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot do the task", "reply_to": anchor_id},
+            "metadata": {"needs_reply": True},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        event_id = assign.json()["data"]["id"]
+
+        reply = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:worker-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Done, please review", "reply_to": event_id},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert reply.status_code == 200
+        reply_meta = reply.json()["data"]["metadata"]
+        assert reply_meta["target_agents"] == ["manager-bot"]
+        assert reply_meta["response_required"] is True
+        assert reply_meta["routed_to_session_manager"] is True
+        assert "required_responses" not in reply_meta
+        assert "handoff_state" not in reply_meta
+
+        ack = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "worker-bot",
+            "status": "replied",
+            "attempt_id": "attempt-1",
+            "reply_message_id": reply.json()["data"]["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert ack.status_code == 200
+
+        inbox = client.get(
+            "/v1/agents/worker-bot/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert inbox.json()["data"]["events"] == []
+
+    def test_blocked_or_failed_worker_update_clears_actionable(self, client, workspace):
+        channel_name = self._enable_manager_mode(client, workspace)
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Manager thread")
+        assign = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:manager-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot do the task", "reply_to": anchor_id},
+            "metadata": {"needs_reply": True},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        event_id = assign.json()["data"]["id"]
+
+        failed = client.post(f"/v1/events/{event_id}/ack", json={
+            "network": workspace["id"],
+            "agent_name": "worker-bot",
+            "status": "failed",
+            "attempt_id": "attempt-1",
+            "retryable": False,
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert failed.status_code == 200
+
+        inbox = client.get(
+            "/v1/agents/worker-bot/inbox",
+            params={"network": workspace["id"], "channel": channel_name},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert inbox.json()["data"]["events"] == []
+
+    def test_human_mentions_and_replies_do_not_steal_owner_in_manager_mode(self, client, workspace):
+        channel_name = self._enable_manager_mode(client, workspace)
+        human = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot can you do this?"},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert human.status_code == 200
+        assert human.json()["data"]["metadata"]["target_agents"] == ["worker-bot"]
+
+        manager_msg = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:manager-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot work it", "reply_to": human.json()["data"]["id"]},
+            "metadata": {"needs_reply": True},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assign_id = manager_msg.json()["data"]["id"]
+
+        human_reply = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "any update?", "reply_to": assign_id},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert human_reply.status_code == 200
+        assert human_reply.json()["data"]["metadata"]["target_agents"] == ["manager-bot"]
+
+    def test_manager_mode_off_keeps_legacy_handoff_fields(self, client, workspace):
+        channel_name = workspace["channel"]["name"]
+        client.post("/v1/join", json={"agent_name": "reviewer", "token": workspace["token"], "network": workspace["id"]})
+        patch = client.patch(
+            f"/v1/workspaces/{workspace["id"]}/members/reviewer",
+            json={"role": "session_manager"},
+            headers={"X-Workspace-Token": workspace["token"]},
+        )
+        assert patch.status_code == 200
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "legacy")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:reviewer",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@agent-alpha please handle this", "reply_to": anchor_id},
+            "metadata": {"needs_reply": True},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert resp.status_code == 200
+        meta = resp.json()["data"]["metadata"]
+        assert meta["required_responses"] == ["agent-alpha"]
+        assert meta["handoff_state"] == "pending"
+
+    def test_manager_mode_semantically_kills_required_response_fields(self, client, workspace):
+        channel_name = self._enable_manager_mode(client, workspace)
+        anchor_id = _anchor_event_id(client, workspace, channel_name, "Manager thread")
+        resp = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:manager-bot",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "@worker-bot take this", "reply_to": anchor_id},
+            "metadata": {
+                "needs_reply": True,
+                "required_responses": ["worker-bot"],
+                "handoff_state": "pending",
+            },
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        meta = resp.json()["data"]["metadata"]
+        assert "required_responses" not in meta
+        assert "handoff_state" not in meta
