@@ -16,6 +16,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!packages/launcher/src/renderer/lib/
+!packages/launcher/src/renderer/lib/**
 lib64/
 parts/
 sdist/
@@ -236,3 +238,4 @@ internal_frontend/
 Formula/
 deploy/
 .vercel
+.gstack/

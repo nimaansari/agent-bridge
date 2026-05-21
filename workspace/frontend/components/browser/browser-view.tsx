@@ -11,17 +11,45 @@ import { toast } from 'sonner';
 export function BrowserView() {
   const {
     browserTabs, selectedBrowserTabId, setSelectedBrowserTabId,
-    closeBrowserTab, reconnectBrowserTab, persistBrowserTab, unpersistBrowserTab, browserContexts,
+    closeBrowserTab, navigateBrowserTab, reconnectBrowserTab, persistBrowserTab, unpersistBrowserTab, browserContexts,
+    refreshBrowserTabs,
   } = useWorkspace();
   const { isMobile, openMobileList, isDetailExpanded, toggleDetailExpanded } = useLayout();
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [sessionDead, setSessionDead] = useState(false);
+  const [navigating, setNavigating] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
+  const [editingUrl, setEditingUrl] = useState(false);
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const prevBlobRef = useRef<string | null>(null);
   const failCountRef = useRef(0);
 
   const tab = browserTabs.find((t) => t.id === selectedBrowserTabId);
+
+  // Validate live session on mount / tab switch. The backend checks if the
+  // BF session is still alive and auto-reconnects if dead, returning fresh
+  // tab data (including a new live_url).
+  useEffect(() => {
+    if (!selectedBrowserTabId || !tab?.liveUrl) return;
+    let cancelled = false;
+
+    const validate = async () => {
+      setReconnecting(true);
+      try {
+        await workspaceApi.validateBrowserTab(selectedBrowserTabId);
+        if (!cancelled) await refreshBrowserTabs();
+      } catch {
+        if (!cancelled) setSessionDead(true);
+      } finally {
+        if (!cancelled) setReconnecting(false);
+      }
+    };
+
+    validate();
+    return () => { cancelled = true; };
+  }, [selectedBrowserTabId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll screenshot every 2 seconds (only when no live URL)
   useEffect(() => {
@@ -105,6 +133,27 @@ export function BrowserView() {
     }
   };
 
+  const startEditingUrl = () => {
+    setUrlDraft(tab?.url || '');
+    setEditingUrl(true);
+    setTimeout(() => urlInputRef.current?.select(), 0);
+  };
+
+  const handleNavigate = async () => {
+    setEditingUrl(false);
+    const trimmed = urlDraft.trim();
+    if (!trimmed || !tab || trimmed === tab.url) return;
+    const url = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    setNavigating(true);
+    try {
+      await navigateBrowserTab(tab.id, url);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to navigate');
+    } finally {
+      setNavigating(false);
+    }
+  };
+
   const handleClose = async () => {
     if (!selectedBrowserTabId) return;
     try {
@@ -165,10 +214,31 @@ export function BrowserView() {
             <ChevronLeft className="size-5" />
           </button>
         )}
-        <Globe className="size-4 text-blue-500 shrink-0" />
+        <Globe className={cn("size-4 shrink-0", navigating ? "text-amber-500 animate-pulse" : "text-blue-500")} />
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium truncate">{tab.title || 'Untitled'}</p>
-          <p className="text-xs text-muted-foreground truncate">{tab.url}</p>
+          {editingUrl ? (
+            <input
+              ref={urlInputRef}
+              value={urlDraft}
+              onChange={(e) => setUrlDraft(e.target.value)}
+              onBlur={() => setEditingUrl(false)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleNavigate();
+                if (e.key === 'Escape') setEditingUrl(false);
+              }}
+              className="w-full text-xs bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1.5 py-0.5 outline-none focus:border-blue-500 font-mono"
+              autoFocus
+            />
+          ) : (
+            <p
+              className="text-xs text-muted-foreground truncate cursor-pointer hover:text-foreground transition-colors"
+              onClick={startEditingUrl}
+              title="Click to edit URL"
+            >
+              {tab.url}
+            </p>
+          )}
         </div>
 
         {/* Shared with badges */}
@@ -240,7 +310,7 @@ export function BrowserView() {
 
       {/* Browser view area */}
       <div className="flex-1 overflow-auto bg-zinc-50 dark:bg-zinc-900 flex items-start justify-center">
-        {tab.liveUrl ? (
+        {tab.liveUrl && !reconnecting ? (
           <iframe
             src={tab.liveUrl}
             className="w-full h-full border-0"

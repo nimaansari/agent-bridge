@@ -364,11 +364,28 @@ class WorkspaceApi {
     return this.mapTab(result);
   }
 
+  /** Validate a browser tab session — auto-reconnects if expired. */
+  async validateBrowserTab(tabId: string): Promise<BrowserTab> {
+    const result = await this.request<Record<string, unknown>>(
+      `/v1/browser/tabs/${tabId}?validate=true`,
+    );
+    return this.mapTab(result);
+  }
+
   /** Reconnect an expired browser tab (creates a new session). */
   async reconnectBrowserTab(tabId: string): Promise<BrowserTab> {
     const result = await this.request<Record<string, unknown>>(
       `/v1/browser/tabs/${tabId}/reconnect`,
       { method: 'POST' },
+    );
+    return this.mapTab(result);
+  }
+
+  /** Navigate a browser tab to a new URL. */
+  async navigateBrowserTab(tabId: string, url: string): Promise<BrowserTab> {
+    const result = await this.request<Record<string, unknown>>(
+      `/v1/browser/tabs/${tabId}/navigate`,
+      { method: 'POST', body: JSON.stringify({ url }) },
     );
     return this.mapTab(result);
   }

@@ -93,6 +93,11 @@ class WorkspaceUpdateRequest(BaseModel):
     name: Optional[str] = None
     settings: Optional[dict] = None
     status: Optional[str] = None
+    # Convenience top-level toggle for the Browser Fabric viewer in clients.
+    # Stored inside `settings.browser_enabled` so we don't need a schema
+    # migration — but exposed as a typed field so clients don't have to
+    # round-trip the whole settings dict to flip one bool.
+    browser_enabled: Optional[bool] = None
 
 
 def _sanitize_workspace_settings(settings: Optional[dict]) -> dict:
@@ -156,12 +161,16 @@ def _format_workspace(ws: Workspace, members: list, now: datetime) -> dict:
             "joinedAt": m.joined_at.isoformat() if m.joined_at else None,
         })
 
+    settings = ws.settings or {}
     return {
         "workspaceId": str(ws.id),
         "slug": ws.slug,
         "name": ws.name,
         "creatorEmail": ws.creator_email,
         "settings": _sanitize_workspace_settings(ws.settings),
+        # Surface browser_enabled at the top level for clients that don't
+        # want to dig into the settings dict. Mirrors what's inside settings.
+        "browserEnabled": bool(settings.get("browser_enabled", False)),
         "collaborationPolicy": _collaboration_policy(ws.settings),
         "session_manager": {
             "manager_agent_id": (ws.settings or {}).get("session_manager_agent"),
@@ -350,6 +359,13 @@ async def update_workspace(
         workspace.name = body.name
     if body.settings is not None:
         workspace.settings = _sanitize_workspace_settings(body.settings)
+    if body.browser_enabled is not None:
+        # Merge into settings rather than overwriting other keys. Must
+        # reassign the dict — SQLAlchemy JSONB mutation tracking won't
+        # pick up an in-place dict update.
+        current = _sanitize_workspace_settings(workspace.settings)
+        current["browser_enabled"] = body.browser_enabled
+        workspace.settings = current
     if body.status is not None:
         workspace.status = body.status
 
