@@ -260,6 +260,43 @@ class TestSendEvent:
         # Master's message in a single-agent channel — no real targets
         # (sentinel list, not missing, so legacy clients don't broadcast)
         assert data["metadata"].get("target_agents") == ["__no_response__"]
+        assert data["metadata"]["reply_required"] is True
+        assert data["metadata"]["reply_responsible"] == ["human:user"]
+        assert data["metadata"]["reply_state"] == "pending"
+
+    def test_anchored_reply_closes_reply_accountability(self, client, workspace):
+        """Every message is accountable until somebody replies, including humans."""
+        channel_name = workspace["channel"]["name"]
+        anchor_id = _anchor_event_id(client, workspace, channel_name)
+        agent_msg = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "openagents:agent-alpha",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Done. Please confirm.", "reply_to": anchor_id},
+            "metadata": {"needs_reply": False},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert agent_msg.status_code == 200
+        agent_id = agent_msg.json()["data"]["id"]
+        assert agent_msg.json()["data"]["metadata"]["reply_responsible"] == ["human:user"]
+
+        human_reply = client.post("/v1/events", json={
+            "type": "workspace.message.posted",
+            "source": "human:user1",
+            "target": f"channel/{channel_name}",
+            "payload": {"content": "Confirmed", "reply_to": agent_id},
+            "network": workspace["id"],
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        assert human_reply.status_code == 200
+
+        poll = client.get("/v1/events", params={
+            "network": workspace["id"],
+            "channel": channel_name,
+            "type": "workspace.message.posted",
+        }, headers={"X-Workspace-Token": workspace["token"]})
+        original = next(event for event in poll.json()["data"]["events"] if event["id"] == agent_id)
+        assert original["metadata"]["reply_state"] == "complete"
+        assert original["metadata"]["reply_answered_by"] == "human:user"
 
     def test_master_message_without_mentions_no_target_agents(self, client, workspace):
         """Master agent messages without mentions produce empty target_agents (no self-trigger)."""

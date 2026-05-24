@@ -1073,6 +1073,74 @@ def _reply_target_agent(quote: Optional[dict]) -> Optional[str]:
     return source[len("openagents:"):] if source.startswith("openagents:") else None
 
 
+def _accountability_responder(source: str) -> str:
+    """Return the stable responder key used by reply accountability metadata."""
+    if source.startswith("openagents:"):
+        return source[len("openagents:"):]
+    if source.startswith("human:"):
+        return "human:user"
+    return source or "unknown"
+
+
+def _close_reply_accountability(reply_quote: Optional[dict], event: Event, db, workspace) -> None:
+    """Mark the message being replied to as answered by this reply sender.
+
+    Agent Bridge no longer has a durable "visible only" message state. Every
+    chat/file message carries reply accountability, and a real anchored reply
+    closes that accountability even when the responder is a human rather than
+    an agent adapter ack.
+    """
+    if not reply_quote:
+        return
+    reply_id = str(reply_quote.get("id") or "").strip()
+    if not reply_id:
+        return
+
+    from app.models import EventRecord
+
+    original = db.execute(
+        select(EventRecord).where(
+            EventRecord.network_id == workspace.id,
+            EventRecord.id == reply_id,
+        )
+    ).scalar_one_or_none()
+    if not original:
+        return
+
+    metadata = dict(original.metadata_ or {})
+    if not metadata.get("reply_required"):
+        return
+
+    responder = _accountability_responder(event.source or "")
+    responses = dict(metadata.get("reply_responses") or {})
+    responses[responder] = {
+        "status": "replied",
+        "reply_message_id": getattr(event, "id", None),
+    }
+    metadata["reply_responses"] = responses
+    metadata["reply_state"] = "complete"
+    metadata["reply_answered_by"] = responder
+    original.metadata_ = metadata
+
+
+def _apply_reply_accountability(event: Event, real_targets: list[str]) -> None:
+    """Attach the universal reply-obligation fields to every durable message.
+
+    `target_agents=["__no_response__"]` remains as a transport sentinel for
+    legacy adapters, but product semantics must never call that "visible only".
+    If no agent is supposed to wake, the responsibility goes back to the human
+    side of the session so somebody can accept, redirect, or answer later.
+    """
+    metadata = event.metadata or {}
+    responsible = [agent for agent in real_targets if agent]
+    if not responsible:
+        responsible = ["human:user"]
+    metadata["reply_required"] = True
+    metadata["reply_responsible"] = responsible
+    metadata.setdefault("reply_state", "pending")
+    event.metadata = metadata
+
+
 def _metadata_bool(metadata: dict, key: str) -> Optional[bool]:
     if key not in metadata:
         return None
@@ -1202,6 +1270,7 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
         # "yes" or "fix this".
         reply_quote = _normalize_reply_to(event, db, workspace, channel, required=False)
     reply_target = _reply_target_agent(reply_quote)
+    _close_reply_accountability(reply_quote, event, db, workspace)
 
     # Routing contract is intentionally strict now:
     # - human wakeups of non-master agents require explicit @mentions
@@ -1322,6 +1391,7 @@ async def _handle_message_posted(event: Event, ctx: PipelineContext) -> Optional
 
     event.metadata["target_agents"] = targets if targets else ["__no_response__"]
     real_targets = [agent_name for agent_name in event.metadata["target_agents"] if agent_name != "__no_response__"]
+    _apply_reply_accountability(event, real_targets)
     if event.source.startswith("openagents:"):
         if manager_mode:
             event.metadata.pop("required_responses", None)

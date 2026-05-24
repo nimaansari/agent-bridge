@@ -76,6 +76,10 @@ type ChatMessage = {
   loopGuard: string | null;
   handoffState: string | null;
   targetAgents: string[];
+  replyRequired: boolean;
+  replyResponsible: string[];
+  replyState: string | null;
+  replyAnsweredBy: string | null;
   visibleOnly: boolean;
   clientMessageId?: string | null;
   pending?: boolean;
@@ -146,6 +150,9 @@ function eventToMessage(event: EventRecord): ChatMessage {
   const rawReply = payload.reply_to || payload.replyTo;
   const rawTargets = Array.isArray(metadata.target_agents) ? metadata.target_agents as string[] : [];
   const targetAgents = rawTargets.filter((agent) => agent && agent !== '__no_response__');
+  const replyResponsible = Array.isArray(metadata.reply_responsible)
+    ? (metadata.reply_responsible as string[]).filter(Boolean)
+    : [];
   const replyTo = rawReply && typeof rawReply === 'object'
     ? rawReply as ReplyTo
     : null;
@@ -184,7 +191,11 @@ function eventToMessage(event: EventRecord): ChatMessage {
       ? Object.fromEntries(Object.entries(metadata.handoff_responses as Record<string, { status?: unknown }>).map(([agent, value]) => [agent, String(value?.status || '')]))
       : {},
     targetAgents,
-    visibleOnly: rawTargets.includes('__no_response__'),
+    replyRequired: Boolean(metadata.reply_required),
+    replyResponsible,
+    replyState: typeof metadata.reply_state === 'string' ? metadata.reply_state : null,
+    replyAnsweredBy: typeof metadata.reply_answered_by === 'string' ? metadata.reply_answered_by : null,
+    visibleOnly: false,
     clientMessageId,
     pending: false,
   };
@@ -254,7 +265,7 @@ function ackLabel(status: string) {
 
 function loopGuardLabel(value: string) {
   if (value === 'needs_reply_required') return 'paused: needs_reply required';
-  if (value === 'terminal_no_reply') return 'terminal: no reply needed';
+  if (value === 'terminal_no_reply') return 'terminal: human/user can close';
   if (value === 'needs_reply_false') return 'terminal: needs_reply=false';
   return value.replaceAll('_', ' ');
 }
@@ -279,6 +290,55 @@ function taskStatusClass(status: string) {
 
 function taskStatusLabel(status: string) {
   return status === 'needs_user' ? 'needs user' : status || 'idle';
+}
+
+function heartbeatAgeMs(agent?: Pick<Agent, 'lastHeartbeatAt'> | null) {
+  if (!agent?.lastHeartbeatAt) return null;
+  const ts = new Date(agent.lastHeartbeatAt).getTime();
+  return Number.isFinite(ts) ? Date.now() - ts : null;
+}
+
+function managerPresenceState(manager?: Agent | null) {
+  if (!manager) {
+    return {
+      label: 'Manager not set',
+      detail: 'No session manager is configured',
+      className: 'border-slate-400/20 bg-slate-400/10 text-slate-200',
+      dotClassName: 'bg-slate-500',
+    };
+  }
+
+  const age = heartbeatAgeMs(manager);
+  if (manager.status !== 'online') {
+    return {
+      label: 'Manager offline',
+      detail: `${agentLabel(manager)} is ${manager.status || 'offline'}`,
+      className: 'border-rose-300/30 bg-rose-300/10 text-rose-100',
+      dotClassName: 'bg-rose-300',
+    };
+  }
+  if (age === null) {
+    return {
+      label: 'Manager heartbeat unknown',
+      detail: `${agentLabel(manager)} has no heartbeat timestamp`,
+      className: 'border-amber-300/30 bg-amber-300/10 text-amber-100',
+      dotClassName: 'bg-amber-300',
+    };
+  }
+  if (age > 120_000) {
+    return {
+      label: 'Manager stale',
+      detail: `${agentLabel(manager)} heartbeat ${Math.round(age / 1000)}s ago`,
+      className: 'border-amber-300/30 bg-amber-300/10 text-amber-100',
+      dotClassName: 'bg-amber-300',
+    };
+  }
+  return {
+    label: 'Manager online',
+    detail: `${agentLabel(manager)} heartbeat ${Math.max(0, Math.round(age / 1000))}s ago`,
+    className: 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100',
+    dotClassName: 'bg-emerald-300',
+  };
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -511,6 +571,14 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
   const composerIntent = useMemo(() => composerIntentSummary({ draft, replyDraft: replyDraft ? { type: replyDraft.type, sender: replyDraft.sender, text: replyDraft.text } : undefined, failedAgent: collaborationSummary.failedAgent, availableAgents: (room?.agents || []).map((agent) => agent.agentName) }), [draft, replyDraft, collaborationSummary.failedAgent, room?.agents]);
   const sendBlockedByRecoveryTarget = composerIntent?.mode === 'recovery' && composerIntent.requiresExplicitTarget && !composerIntent.targetAgent;
   const attachmentIntent = useMemo(() => attachmentIntentEnvelope({ composerIntent, replyDraft }), [composerIntent, replyDraft]);
+  const managerAgent = useMemo(() => {
+    const agents = room?.agents || [];
+    const configured = collaborationPolicy.sessionManagerAgent;
+    return agents.find((agent) => configured && agent.agentName === configured)
+      || agents.find((agent) => ['session_manager', 'manager', 'conductor'].includes(agent.role))
+      || null;
+  }, [collaborationPolicy.sessionManagerAgent, room?.agents]);
+  const managerPresence = useMemo(() => managerPresenceState(managerAgent), [managerAgent]);
 
   const focusComposer = useCallback((prefill?: string) => {
     if (typeof prefill === 'string') {
@@ -625,7 +693,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
       ? crypto.randomUUID()
       : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const replyTo = replyDraft;
-    const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {}, needsReply: null, loopGuard: null, handoffState: null, targetAgents: [], visibleOnly: false, clientMessageId, pending: true };
+const optimistic: ChatMessage = { id: `local-${Date.now()}`, senderName: 'You', senderType: 'human', content, timestamp: Date.now(), attachments: [], replyTo, acks: [], responseRequired: false, requiredResponses: [], handoffResponses: {}, needsReply: null, loopGuard: null, handoffState: null, targetAgents: [], replyRequired: true, replyResponsible: ['human:user'], replyState: 'pending', replyAnsweredBy: null, visibleOnly: false, clientMessageId, pending: true };
     setMessagesByChannel((prev) => appendMessageForChannel(prev, currentChannel, optimistic));
     try {
       await apiFetch('/v1/events', {
@@ -915,6 +983,15 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
             <p className="text-xs text-slate-500">Current session: {currentChannelMeta ? channelTitle(currentChannelMeta) : 'None selected'}</p>
           </div>
           <div className="flex items-center gap-2">
+            <div className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs sm:hidden ${managerPresence.className}`} title={managerPresence.detail} aria-label={managerPresence.detail}>
+              <span className={`size-2 rounded-full ${managerPresence.dotClassName}`} />
+              <span className="font-semibold">{managerPresence.label.replace(/^Manager /, '')}</span>
+            </div>
+            <div className={`hidden max-w-[22rem] items-center gap-2 rounded-xl border px-3 py-2 text-sm sm:inline-flex ${managerPresence.className}`} title={managerPresence.detail} aria-label={managerPresence.detail}>
+              <span className={`size-2 rounded-full ${managerPresence.dotClassName}`} />
+              <span className="font-semibold">{managerPresence.label}</span>
+              <span className="hidden truncate text-xs opacity-80 xl:inline">{managerPresence.detail}</span>
+            </div>
             <button onClick={() => setConnectOpen(true)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm hover:border-cyan-300/40 lg:hidden"><Plus className="size-4" /> Add agent</button>
             <button onClick={refresh} className="rounded-xl border border-white/10 p-2 text-slate-300 hover:border-cyan-300/40"><RefreshCw className={loading ? 'size-4 animate-spin' : 'size-4'} /></button>
             <button disabled={deletingSession || !currentChannel} onClick={deleteCurrentSession} className="inline-flex items-center gap-2 rounded-xl border border-rose-300/20 px-3 py-2 text-sm text-rose-100 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50">
@@ -1016,16 +1093,16 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                           ))}
                         </div>
                       )}
-                      {((((collaborationPolicy.mode !== 'manager' && collaborationPolicy.mode !== 'manager_led') && (message.targetAgents.length > 0 && message.targetAgents.some((agentName) => agentName !== channelCapabilitySnapshot.ownerAgent)) && !(message.responseRequired && message.requiredResponses.length > 0))) || (message.visibleOnly && message.senderType === 'agent')) && (
+                      {((((collaborationPolicy.mode !== 'manager' && collaborationPolicy.mode !== 'manager_led') && (message.targetAgents.length > 0 && message.targetAgents.some((agentName) => agentName !== channelCapabilitySnapshot.ownerAgent)) && !(message.responseRequired && message.requiredResponses.length > 0))) || (message.replyRequired && message.replyResponsible.length > 0)) && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {(collaborationPolicy.mode !== 'manager' && collaborationPolicy.mode !== 'manager_led') && message.targetAgents.length > 0 && message.targetAgents.some((agentName) => agentName !== channelCapabilitySnapshot.ownerAgent) && !(message.responseRequired && message.requiredResponses.length > 0) ? (
                             <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-0.5 text-[11px] text-cyan-100">
                               actionable → {message.targetAgents.join(', ')}
                             </span>
                           ) : null}
-                          {message.visibleOnly && message.senderType === 'agent' ? (
-                            <span className="rounded-full border border-slate-400/20 bg-slate-400/10 px-2 py-0.5 text-[11px] text-slate-300">
-                              visible only
+                          {message.replyRequired && message.replyResponsible.length > 0 ? (
+                            <span className={message.replyState === 'complete' ? 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100' : 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100'}>
+                              {message.replyState === 'complete' ? `answered by ${message.replyAnsweredBy || message.replyResponsible.join(', ')}` : `reply needed → ${message.replyResponsible.join(', ')}`}
                             </span>
                           ) : null}
                         </div>
@@ -1051,7 +1128,7 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                           })}
                         </div>
                       )}
-                      {showDebug && (message.needsReply !== null || message.loopGuard || message.handoffState) && (
+                      {showDebug && (message.needsReply !== null || message.loopGuard || message.handoffState || message.replyState) && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {message.needsReply !== null && (
                             <span className={message.needsReply ? 'rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-0.5 text-[11px] text-cyan-100' : 'rounded-full border border-slate-400/20 bg-slate-400/10 px-2 py-0.5 text-[11px] text-slate-300'}>
@@ -1060,6 +1137,9 @@ function RoomPageContent({ workspaceId }: { workspaceId: string }) {
                           )}
                           {message.handoffState && (
                             <span className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-300">handoff {message.handoffState}</span>
+                          )}
+                          {message.replyState && (
+                            <span className="rounded-full border border-white/10 bg-slate-950/70 px-2 py-0.5 text-[11px] text-slate-300">reply {message.replyState}</span>
                           )}
                           {message.loopGuard && (
                             <span className={message.loopGuard === 'needs_reply_required' ? 'rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100' : 'rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[11px] text-emerald-100'}>
